@@ -103,7 +103,6 @@ TYPED = [
     "tools/patchkit/pk_dsp_stalls.py",
     "tests/patchkit/test_dsp_waste.py",
     "tests/support/plaits_vectors.py",
-    "tests/support/iterator_vectors.py",
     "tests/patchkit/test_plaits_model0_h2.py",
     "tests/plaits/test_ws_host.py",
     "tests/patchkit/test_plaits_model_digests.py",
