@@ -43,8 +43,13 @@ static const float kMaxFrequency = 0.25f;
 
 /* stmlib::ParameterInterpolator: `commit` is its destructor (writes the value back to the state). */
 typedef struct { float *state; float value; float increment; } Interp;
+/* itof_nonneg(size) written out (selcc has no inlining: the same operations without its call and frame). */
 static Interp interp(float *s, float target, int size) {
-  Interp p; p.state = s; p.value = *s; p.increment = (target - *s) / itof_nonneg(size); return p;
+  Interp p;
+  union { int i; float f; } u;
+  float d = target - *s;
+  u.i = 0x4B000000 | size;
+  p.state = s; p.value = *s; p.increment = d / (*(float *)(void *)&u - 8388608.0f); return p;
 }
 static float next(Interp *p) { p->value += p->increment; return p->value; }
 static float subsample(Interp *p, float t) { return p->value + p->increment * t; }

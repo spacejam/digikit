@@ -53,6 +53,7 @@ reports 0 errors; `uv run python -m tools.patchkit.pk_encoding_gate X X.plan.jso
 | `out/patch/diag-h1-i13return-96k-1.17.ungated.syx` | `02926b3f833ccdaa51172b98af3de83c4f65779999a3ea901d1a527c6796652c` | a copy of the pre-Task-5b h1a; not rebuildable from this branch |
 | `out/patch/plaits-25models-fast5-names-splash-48k-1.17.syx` (lane/opt-o6: DX7 + O6 kernels, voice 17,124 B; owner checks: checksums ok, bootcheck 0 errors, encoding gate 0 violations, sections 2, 4, 5, 8 byte-equal to stock; not yet on hardware) | `f640129cd648e0e44ef061dabfb20b2fb8457fe8d344d09882e68cd30d5bccc0` | `uv run python -m tools.patchkit.patchkit patch --firmware firmware/Digitakt_II_OS1.17.syx --modules ui/boot-splash,machines/plaits-48k -o out/patch/plaits-25models-fast5-names-splash-48k-1.17.syx` |
 | `out/patch/plaits-25models-fast6-names-splash-48k-1.17.syx` (H-opt8: lane/opt-o7, the STRING and DX7 kernels; owner checks: checksums ok, bootcheck 0 errors, encoding gate 0 violations, sections 2, 4, 5, 8 byte-equal to stock; not yet on hardware) | `aa8f314c345d1173d1229fac59a1ff74be8d0fa0e64a3776178def3fa33f41bd` | `uv run python -m tools.patchkit.patchkit patch --firmware firmware/Digitakt_II_OS1.17.syx --modules ui/boot-splash,machines/plaits-48k -o out/patch/plaits-25models-fast6-names-splash-48k-1.17.syx` (after `pk_build build-all`; `RUSTUP_TOOLCHAIN=1.98.1-aarch64-apple-darwin`) |
+| `out/patch/plaits-25models-fast7-names-splash-48k-1.17.syx` (H-opt9: lane/opt-o8, DX7 as kernels (voice, patch unpack, envelope set-up, buffer loops), the wrapper's per-block path in wrap_sm.s, interp without a nested call; owner checks: checksums ok, bootcheck 0 errors, encoding gate 0 violations, sections 2, 4, 5, 8 byte-equal to stock; not yet on hardware) | `b9a10e2382f52c9750b93bd88e100c409dd7f35378a7b52c4afdfcec948bbc85` | `uv run python -m tools.patchkit.patchkit patch --firmware firmware/Digitakt_II_OS1.17.syx --modules ui/boot-splash,machines/plaits-48k -o out/patch/plaits-25models-fast7-names-splash-48k-1.17.syx` (lane opt-o8 at 7b47bd07, after `pk_build build-all`; `RUSTUP_TOOLCHAIN=1.98.1-aarch64-apple-darwin`) |
 
 `mise run patch -- ...` is the same command. The gate runs by default; never add `--no-encoding-gate` for an image
 you flash. The H2 hashes above are those of the images after the final fix wave (the stack-switch order was proved
@@ -938,3 +939,17 @@ the C on the concrete core and in the compiled-core digests. Projected 8-track l
 4. Three tracks of STRING and three of DX7 on one step. Expected: no dropouts; report the first track count that
    crackles if any.
 
+## H-opt9: DX7 kernels and the shared wrapper
+
+H-opt9 (`out/patch/plaits-25models-fast7-names-splash-48k-1.17.syx`, `b9a10e23…`) is H-opt8 plus the O8 work: DX7
+(18, 19, 20, 24) renders its voice, unpacks patches and sets its envelopes in `lib/dx_sm.s`; every model's per-block
+glue (plaits_render, render_engine, render_sub) runs in `wrap_sm.s`. All bit-identical to the C on the concrete core.
+Projected 8-track load (isolated core, cold / 7 of 8 warm): DX7 161 / 144 % -> 103 / 86 %; the other models 1-5 pp
+lower (OPTIMIZING.md, 2026-10-23).
+
+1. Load H-opt9, new project, track 1 PLAITS on DX7-1. Play each bank's patches (HARMONICS sweep, DX7-1..4) with held
+   notes and releases, MORPH and TIMBRE swept. Expected: as H3p (sound, note-off releases, patch names).
+2. Switch MODEL across several models (VA, CHORD, SWARM, DX7-2, KICK) with notes in between. Expected: each plays as
+   on H-opt8; SWARM keeps its continuous grains; DX7 releases at note-off.
+3. Six DX7 tracks on one step, then eight. Expected: no dropouts at six; report the first track count that crackles.
+4. A stereo sample (ONESHOT) on a neighbouring track alongside four PLAITS tracks. Expected: it plays normally.

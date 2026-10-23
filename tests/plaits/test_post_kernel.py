@@ -101,7 +101,12 @@ def built(
         pk_sharc.compile_c(LAYOUT_C, include_dirs=inc),
     ]
     if kernel:
-        objs.insert(0, pk_sharc.assemble((DSP / "post_sm.s").read_text()))
+        objs.insert(
+            0,
+            pk_sharc.assemble(
+                (DSP / "post_sm.s").read_text() + "\n" + (DSP / "wrap_sm.s").read_text()
+            ),
+        )
     first = pk_sharc.merge(objs)
     missing = sorted(
         {

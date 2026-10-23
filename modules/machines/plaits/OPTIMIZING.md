@@ -687,3 +687,50 @@ Template, one entry per attempt:
 ### 2026-10-23 O7 scope cut (owner): deferred to a later round
 - SWARM (8; the grain loop as pairs), TERRAIN (21) and STRING MACHINE (22) remainders, PHASE-DIST (17) and CHORD (6)
   hot-loop checks were not started in O7.
+
+### 2026-10-23 DX7 (18-20, 24): the whole voice as kernels (voice_render, render_ops' set-up, patch_unpack, op_env_set, the buffer loops), WIN
+- Before -> after (pk_dsp_stalls, seed-1 fuzz-worst block, high cold): 18 93,751 -> 45,619 (49,014 -> 20,404
+  instructions), 19 92,094 -> 44,558, 20 67,365 -> 48,015 (a model-change block: the inits), 24 88,095 -> 41,969;
+  code-cache fills 456/348 -> 211/72 (cold/warm). 8-track projection 161 % -> 103 % cold, 144 % -> 86 % with 7 warm.
+- What: `lib/dx_sm.s` (generated, `lib/gen_dx_kernel.py`): dx_voice_kernel runs voice_render after voice_setup: the
+  scales (pow2_fast_1), the pitch envelope, f0 (semitones_to_ratio_safe and SemitonesToRatio), the note-on with
+  normalize_velocity, per operator f[i], rate scaling, env_render with env_value_at (a local subroutine with a reshape
+  flag), keyboard_scaling, the level and both pow2_fast_2, then render_ops' set-up (ftou, the amplitude increment) and
+  the algorithm's calls with one DO loop per renderer. The C computes only the two divisions (1 / size, fb_scale).
+  dx_pre/post_kernel are six_op_render's buffer loops (SoftClip with selcc's division), dx_unpack_kernel is
+  patch_unpack (the 128 bytes into a frame row with FEXT, then the fields with selects), dx_env_set_kernel is
+  op_env_set (selcc's division as a local subroutine). The op loop keeps 32.0, 2^26, 2^31 and 1.0 in registers and
+  uses FEXT for the mantissa: 23 instructions per operator-sample (was 29).
+- Traps: a conditional `IF GT R1 = R2 OR R2` writes the flags when it executes, so a second select on the same COMP
+  needs its own COMP (caught by the run-on test, a kb_scaling depth of 0). A test that only strikes bank patches never
+  moves the pitch envelope: test_dx_kernel now pokes random pitch-envelope levels, algorithms and feedback amounts
+  (a mutation of the * 12.0f went unnoticed before). A tiny constant mutation of a pitch path can stay invisible
+  because SemitonesToRatio quantises to 1/256 semitone: mutate by a whole step.
+- Reuse: the selcc ABI walk (word offsets of the C structs; a struct of per-call values filled by the C) and the env
+  subroutine; the CALL/RTS (DB) local subroutine for anything called more than once per pass.
+- Evidence: commits 39997087, 7daea5c5 (lane opt-o8); tests/plaits/test_dx_kernel.py (16, mutation-checked).
+
+### 2026-10-23 shared wrapper: plaits_render, render_engine and render_sub in assembly with selcc's calling convention, WIN
+- Before -> after (all 25 models, seed-1 fuzz-worst blocks, with the interp change below; layout not held, see the
+  next entry): -420 to -700 instructions and -1.5k to -4.4k high cycles per voice block for the non-DX7 models;
+  code-cache fills (mean over 25 models, cold/warm) 263/131 -> 208/74 with DX7.
+- What: `wrap_sm.s` (generated, `lib/gen_wrap_kernel.py`) is plaits_render at 48 kHz: note_on through a C helper
+  (plaits_note_on_c), the armed/active/ported tests, the DX7 release latch, Params with unit()'s operations and
+  comparisons, the per-sub-block trigger, render_sub's tree with one CJUMP site per engine, the stage kernel, zeros.
+  It is CJUMPed by plaits_track like the C, keeps its locals below I6, CJUMPs the C engines with selcc's argument
+  registers and stack, and at any other rate jumps to the C (plaits_render_c) on the same frame. unit, the DX7 test
+  and the ported test are macros (all 25 models are ported now: a range). tests/plaits/test_wrap_kernel.py runs both
+  against the C with logging stubs for every engine and init function (dispatch, Params, trigger, note_on, zeros,
+  96 kHz, register contract, strict gate; mutation-checked).
+- Traps: a hand-written selcc-convention routine must end in `.COMPRESS` (the return `JUMP (M14, I12) (DB); RFRAME`
+  is mis-assembled under .NOCOMPRESS, as in the O1 entry); a test stub that logs stack arguments of a function that has
+  none reads the caller's frame, which differs between an assembly and a C caller.
+- Evidence: commit a9cc12d2; tests/plaits/test_wrap_kernel.py, test_post_kernel.py.
+
+### 2026-10-23 interp with itof_nonneg written out, WIN (small); hot-code layout, NEUTRAL (noise of +-20 fills)
+- interp (21 engine files) called itof_nonneg as a function: written out it is the same operations, about 20
+  instructions less per call (VA -440, CHORD -500, PHASE-DIST -220 instructions per block).
+- Layout was not held in these A/Bs: each change shifts every later function. Models near the 16 KB cache (VA,
+  FORMANT, WAVETABLE) moved +4..+50 warm fills while the instruction counts fell (VA warm 90 -> 142); most others
+  fell. The cold/warm figures per model are within the +-20-fill layout noise O5 measured, so only the instruction and
+  stall deltas are claimed per change; the per-model table (report of O8) is as built.

@@ -1,9 +1,10 @@
-"""DX7's operator kernel (modules/machines/plaits/src/dsp/lib/dx_sm.s: dx_ops_kernel) on the isolated concrete SHARC+
+"""DX7's voice kernel (modules/machines/plaits/src/dsp/lib/dx_sm.s: dx_voice_kernel) on the isolated concrete SHARC+
 core: six_op_render built for the DSP against the same file built with -DPL_DX_C (selcc's C, the code the core digests
 were recorded from), bit for bit on out[], aux[] and the engine state, over run-on sequences from init in every bank
-(random patches, so every algorithm's renderers, note-ons, holds and releases, random knobs) and sub-block sizes 1,
-7 and 16; the kernel leaves every register outside the scratch set as it found it and passes the strict encoding
-gate."""
+(random patches, so every algorithm's renderers, note-ons, holds and releases, random knobs), sub-block sizes 1, 7
+and 16, and every algorithm with every feedback amount poked into the loaded patch (the only way to reach the
+feedback paths of renderers 6 and 7: no bank patch with a 3-op loop has feedback > 0); the kernel leaves every
+register outside the scratch set as it found it and passes the strict encoding gate."""
 
 from __future__ import annotations
 
@@ -70,15 +71,10 @@ def bits(x: float) -> int:
     return struct.unpack("<I", struct.pack("<f", x))[0]
 
 
-# render_ops is static: a test-only entry point appended to the translation unit (both builds).
-OPS_WRAPPER = """
-void dx_test_render_ops(int n, int ms, int additive, unsigned int *ops_phase, float *ops_amplitude, const float *f,
-                        const float *a, float *fb_state, int fb_amount, const float *modulation, float *out,
-                        int size) {
-  render_ops(n, ms, additive, ops_phase, ops_amplitude, f, a, fb_state, fb_amount, modulation, out, size);
-}
-"""
-OPS = 0x200D2000  # phase[3], amplitude[3], f[3], a[3], fb_state[2], modulation[32] (one word apart each row)
+# SixOp: five words, temp[96], acc[32], then voice[2] of 276 words; in a voice, phase[6] at 23 and the patch at 132
+# (algorithm at 266, feedback at 267).
+VOICE0, VOICE_WORDS, V_PHASE, V_ALGORITHM, V_FEEDBACK = 133, 276, 23, 266, 267
+V_PITCH_LEVEL = 121 + 7  # pitch_env.level[4]
 
 
 @cache
@@ -86,7 +82,7 @@ def built(kernel: bool) -> tuple[pk_sharc.Linked, list[tuple[int, bytes]]]:
     defines = () if kernel else ("PL_DX_C",)
     objs = [
         pk_sharc.compile_c(
-            (DSP / "engines" / "six_op.c").read_text() + OPS_WRAPPER,
+            (DSP / "engines" / "six_op.c").read_text(),
             include_dirs=[DSP / "engines", LIB, DSP],
             defines=defines,
         ),
@@ -282,60 +278,46 @@ def test_every_patch_of_the_bank(pair: tuple[Core, Core], bank: int) -> None:
     assert ker.get(ST, STATE_WORDS, 0) == ref.get(ST, STATE_WORDS, 0)
 
 
-@pytest.mark.parametrize("renderer", range(8))
-def test_render_ops_every_renderer(pair: tuple[Core, Core], renderer: int) -> None:
-    """render_ops for each renderer of Algorithms<6>, random phases, frequencies (some above 0.5), amplitudes and
-    targets, feedback amounts 0..7, modulation inputs and sizes 1..32, out[] accumulated or written."""
-    n, ms, add = [
-        (1, -2, 0),
-        (1, -2, 1),
-        (1, -1, 0),
-        (1, -1, 1),
-        (1, 0, 0),
-        (1, 0, 1),
-        (3, 2, 1),
-        (2, 1, 1),
-    ][renderer]
+@pytest.mark.parametrize("group", range(4))
+def test_every_algorithm_and_feedback(pair: tuple[Core, Core], group: int) -> None:
+    """Algorithms 8 group .. 8 group + 7, each with feedback amounts 0, 7 and one in 1..6 poked into both voices' loaded
+    patch, random phases and pitch envelope levels, then struck again, held and released: every renderer, including 6 and 7 with feedback > 0."""
     ker, ref = pair
-    rng = random.Random(500 + renderer)
-    for case in range(12):
-        size = rng.choice([32, 32, 16, 7, 1])
-        rows = (
-            [rng.getrandbits(32) for _ in range(3)]
-            + [bits(rng.uniform(0.0, 4.0)) for _ in range(3)]
-            + [
-                bits(rng.choice([rng.uniform(0.0, 0.05), rng.uniform(0.0, 0.7)]))
-                for _ in range(3)
-            ]
-            + [bits(rng.uniform(0.0, 5.0)) for _ in range(3)]
-            + [bits(rng.uniform(-1.0, 1.0)) for _ in range(2)]
-            + [bits(rng.uniform(-8.0, 8.0)) for _ in range(32)]
-        )
-        outw = [bits(rng.uniform(-1.0, 1.0)) for _ in range(size)]
-        fb = rng.randrange(8)
-        res = []
+    rng = random.Random(900 + group)
+    start(pair, group, 300 + group)
+    for algorithm in range(8 * group, 8 * group + 8):
+        prm = rand_params(rng, 5)
+        prm[1] = bits(rng.random())
         for core in (ker, ref):
-            core.put(OPS, rows)
-            core.put(OUT, outw)
-            core.call(
-                "dx_test_render_ops.",
-                [
-                    n,
-                    ms & 0xFFFFFFFF,
-                    add,
-                    OPS,
-                    OPS + 12,
-                    OPS + 24,
-                    OPS + 36,
-                    OPS + 48,
+            render(core, prm)
+            render(core, prm[:4] + [4] + prm[5:])
+        for fb in (0, 7, rng.randrange(1, 7)):
+            phases = [rng.getrandbits(32) for _ in range(6)]
+            pitch = [bits(rng.uniform(-0.5, 0.5)) for _ in range(4)]
+            for core in (ker, ref):
+                for vi in range(2):
+                    base = ST + 4 * (VOICE0 + VOICE_WORDS * vi)
+                    core.poke(base + 4 * V_ALGORITHM, algorithm)
+                    core.poke(base + 4 * V_FEEDBACK, fb)
+                    for k, w in enumerate(phases):
+                        core.poke(base + 4 * (V_PHASE + k), w)
+                    for k, w in enumerate(pitch):
+                        core.poke(base + 4 * (V_PITCH_LEVEL + k), w)
+            for blk, trig in enumerate((4, 5, 4, 0)):
+                prm = prm[:4] + [trig] + prm[5:]
+                if trig == 5:
+                    prm[2] = bits(rng.random())
+                    prm[5] = bits(rng.random())
+                size = rng.choice([16, 16, 7, 1])
+                assert render(ker, prm, size) == render(ref, prm, size), (
+                    algorithm,
                     fb,
-                    OPS + 56,
-                    OUT,
-                    size,
-                ],
+                    blk,
+                )
+            assert ker.get(ST, STATE_WORDS, 0) == ref.get(ST, STATE_WORDS, 0), (
+                algorithm,
+                fb,
             )
-            res.append((core.get(OPS, len(rows)), core.get(OUT, size)))
-        assert res[0] == res[1], case
 
 
 def test_kernel_cost(pair: tuple[Core, Core]) -> None:
@@ -406,7 +388,7 @@ def test_kernel_passes_the_strict_encoding_gate() -> None:
     linked = pk_sharc.link(
         pk_sharc.assemble((LIB / "dx_sm.s").read_text()),
         BASE_SW,
-        {"pl_lut_sine.": DATA},
+        {"pl_lut_sine.": DATA, "pl_dx_op_level.": DATA, "pl_dx_op_increment.": DATA},
     )
 
     class Mem:

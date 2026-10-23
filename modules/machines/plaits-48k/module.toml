@@ -24,6 +24,7 @@ sources = [
   "../plaits/src/dsp/lib/resonator_svf4_sm.s",
   "../plaits/src/dsp/lib/drums_sm.s",
   "../plaits/src/dsp/post_sm.s",
+  "../plaits/src/dsp/wrap_sm.s",
   "../plaits/src/dsp/lib/wavetable_sm.s",
   "../plaits/src/dsp/lib/string_synth_sm.s",
   "../plaits/src/dsp/lib/chord_loops_sm.s",

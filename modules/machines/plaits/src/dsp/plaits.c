@@ -71,12 +71,9 @@ const float plaits_gain = 0.75125f;
 const float plaits_gain = 0.601f;
 #endif
 
-static float unit(float word)
-{
-    float x = word * PL_INV_FULL;
-    CONSTRAIN(x, 0.0f, 1.0f);
-    return x;
-}
+/* unit(word): the knob word (0 .. 0x7f00) as 0 .. 1. A macro (selcc has no inlining): the same operations as the
+   function it replaces, without its call and frame on every block. */
+#define PL_UNIT(dst, word) { dst = (word) * PL_INV_FULL; CONSTRAIN(dst, 0.0f, 1.0f); }
 
 static void zeros(float *out, int n)
 {
@@ -111,10 +108,7 @@ void plaits_voice_clear(PlaitsVoice *v)
 }
 
 /* The DX7 models: 18, 19, 20 (upstream's three banks) and 24 (the owner's bank); bank 0..3. */
-static int plaits_is_dx7(int model)
-{
-    return (model >= PLAITS_MODEL_DX7_1 && model <= PLAITS_MODEL_DX7_3) || model == PLAITS_MODEL_DX7_4;
-}
+#define PL_IS_DX7(model) (((model) >= PLAITS_MODEL_DX7_1 && (model) <= PLAITS_MODEL_DX7_3) || (model) == PLAITS_MODEL_DX7_4)
 
 static int plaits_dx7_bank(int model)
 {
@@ -138,7 +132,7 @@ static void note_on(PlaitsVoice *v, const PlaitsFrame *f, int rate)
 {
     int model = (int)(f->model * PL_INV_256);
 #ifndef PL_OUTPUT_STAGE_NEUTRAL
-    v->accent = unit(f->velocity);
+    PL_UNIT(v->accent, f->velocity)
 #else
     v->accent = 0.8f;
 #endif
@@ -194,7 +188,7 @@ static void note_on(PlaitsVoice *v, const PlaitsFrame *f, int rate)
         phase_dist_init(PL_PHASE_DIST(v));
     } else if (model == PLAITS_MODEL_TERRAIN) {
         terrain_init(PL_TERRAIN(v));
-    } else if (plaits_is_dx7(model)) {
+    } else if (PL_IS_DX7(model)) {
         /* Voice's engine change for the six-op engine: Init, LoadUserData(its bank), Reset */
         six_op_init(PL_SIX_OP(v));
         six_op_load_bank(PL_SIX_OP(v), plaits_dx7_bank(model));
@@ -276,7 +270,7 @@ void plaits_post(float *peak, float gain, float *x, int n)
 
 /* The latched model's engine for one sub-block: a binary tree of model tests (five per call), not the chain of up to
    15 tests it replaces, so the executed path touches a few code lines. Only models with an engine reach it
-   (plaits_ported); the leaves are the engines, in model order (DX7: 18, 19, 20 and 24). */
+   (PL_PORTED); the leaves are the engines, in model order (DX7: 18, 19, 20 and 24). */
 static void render_sub(PlaitsVoice *v, const Params *p)
 {
     int m = v->model;
@@ -393,10 +387,10 @@ static void render_engine(PlaitsVoice *v, const PlaitsFrame *f, int trig, float 
 #endif
 
     p.note = f->pitch * PL_INV_256 + (f->tune * PL_INV_256 - 64.0f);
-    p.harmonics = unit(f->harmonics);
-    p.timbre = unit(f->timbre);
-    p.morph = unit(f->morph);
-    mix = unit(f->mix);
+    PL_UNIT(p.harmonics, f->harmonics)
+    PL_UNIT(p.timbre, f->timbre)
+    PL_UNIT(p.morph, f->morph)
+    PL_UNIT(mix, f->mix)
     p.accent = v->accent;
 #ifdef PL_POST_KERNEL
     k[0] = PL_F(plaits_out_gain)[v->model];
@@ -408,7 +402,7 @@ static void render_engine(PlaitsVoice *v, const PlaitsFrame *f, int trig, float 
         p.trigger = (trig && s == 0) ? TRIG_RISING_HIGH : TRIG_HIGH;
         if (v->model == PLAITS_MODEL_SWARM) {
             p.trigger = TRIG_UNPATCHED;
-        } else if (plaits_is_dx7(v->model)) {
+        } else if (PL_IS_DX7(v->model)) {
             /* The DX7 exception: the gate is high from the note-on (RISING_EDGE | HIGH in its first sub-block) until the
                Digitakt's note-off (v->released: latched from the DSP's release pulse f->released, cleared at the next
                note-on), then LOW. */
@@ -436,14 +430,21 @@ static void render_engine(PlaitsVoice *v, const PlaitsFrame *f, int trig, float 
 }
 
 /* The models with an engine: 0..7, SWARM 8, NOISE 9, DUST 10, STRING 11, RINGS 12, KICK 13, SNARE 14, HIHAT 15, VCF-VA 16, PHASE-DIST 17, DX7 18..20, TERRAIN 21, STRING MACHINE 22, SQUARE 23, DX7-4 24. */
-static int plaits_ported(int model)
+/* Every model 0 .. 24 has an engine now, so the test is a range (a macro: no call and frame on every block). */
+#define PL_PORTED(model) ((model) >= PLAITS_MODEL_VA && (model) <= PLAITS_MODEL_DX7_4)
+
+#if defined(__ADSP21569__) && !defined(PL_WRAP_C) && !defined(PL_POST_C) && !defined(PL_OUTPUT_STAGE_NEUTRAL)
+/* The DSP build: plaits_render at 48 kHz, render_engine and render_sub run in wrap_sm.s (lib/gen_wrap_kernel.py),
+   bit-identical to the C below, which stays for the host, for other rates (the kernel jumps here) and as the
+   -DPL_WRAP_C reference (tests/plaits/test_wrap_kernel.py). The kernel reads the voice at fixed offsets. */
+#define PL_WRAP_KERNEL 1
+typedef char pl_engine_size_check[(sizeof(PlaitsEngine) == 16572) ? 1 : -1]; /* E in lib/gen_wrap_kernel.py */
+void plaits_note_on_c(PlaitsVoice *v, const PlaitsFrame *f, int rate)
 {
-    return (model >= PLAITS_MODEL_VA && model <= PLAITS_MODEL_SPEECH) || model == PLAITS_MODEL_SWARM || model == PLAITS_MODEL_NOISE || model == PLAITS_MODEL_DUST || model == PLAITS_MODEL_STRING
-        || (model >= PLAITS_MODEL_RINGS && model <= PLAITS_MODEL_HIHAT)
-        || model == PLAITS_MODEL_VCF || model == PLAITS_MODEL_PHASE_DIST || model == PLAITS_MODEL_TERRAIN
-        || model == PLAITS_MODEL_SQUARE || model == PLAITS_MODEL_STRING_MACHINE
-        || (model >= PLAITS_MODEL_DX7_1 && model <= PLAITS_MODEL_DX7_3) || model == PLAITS_MODEL_DX7_4;
+    note_on(v, f, rate);
 }
+#define plaits_render plaits_render_c
+#endif
 
 int plaits_render(PlaitsVoice *v, const PlaitsFrame *f, int trig, float *out, int n, int rate)
 {
@@ -452,7 +453,7 @@ int plaits_render(PlaitsVoice *v, const PlaitsFrame *f, int trig, float *out, in
     if (trig) {
         note_on(v, f, rate);
     }
-    if (!v->armed || !f->active || !(plaits_ported(v->model))) {
+    if (!v->armed || !f->active || !(PL_PORTED(v->model))) {
         zeros(out, n);
         return 0;
     }
@@ -463,6 +464,9 @@ int plaits_render(PlaitsVoice *v, const PlaitsFrame *f, int trig, float *out, in
     }
     return 1;
 }
+#ifdef PL_WRAP_KERNEL
+#undef plaits_render
+#endif
 
 /* The state of the 16 tracks' voices (the even voice of each track renders; the odd one copies it). On the DSP it is
  * reserved memory (`.PKBSS plaits_voice_mem.` in plaits_entry.s: not loaded, so not zeros in the boot stream, and

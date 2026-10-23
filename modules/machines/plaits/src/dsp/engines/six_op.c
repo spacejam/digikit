@@ -52,10 +52,23 @@ void pl_index_check(int table, int index);
 #endif
 
 #if defined(__ADSP21569__) && !defined(PL_DX_C) && !defined(PL_INDEX_CHECK)
-/* The DSP build: render_ops' sample loop runs in lib/dx_sm.s, bit-identical to the C loop below, which stays for the
-   host and as the -DPL_DX_C reference (tests/plaits/test_dx_kernel.py). */
+/* The DSP build: voice_render's operator loop and its calls of render_ops run in lib/dx_sm.s (dx_voice_kernel),
+   bit-identical to the C below, which stays for the host and as the -DPL_DX_C reference (tests/plaits/test_dx_kernel.py).
+   DxVoiceK carries the two divisions the C computes and the tables; the kernel reads them by word offset, in this
+   order, and writes render_ops' per-operator frequency and amplitude increment back into it. */
 #define PL_DX_KERNEL 1
-void dx_ops_kernel(unsigned int *pf, float *fk, const float *modulation, float *out, int size, int variant);
+typedef struct {
+  float scale, fb_scale;
+  int size;
+  const unsigned int *calls, *modmask, *amp_mod_lut, *ratio_high, *ratio_low, *cube_root;
+  unsigned int frequency[6];
+  float amplitude_increment[6];
+} DxVoiceK;
+void dx_voice_kernel(SixOpVoice *v, float *temp, DxVoiceK *k);
+void dx_pre_kernel(float *temp, const float *acc, int size);
+void dx_post_kernel(float *temp, float *out, float *aux, float *acc, int size);
+void dx_unpack_kernel(SixOpPatch *p, const unsigned int *bank, int index);
+void dx_env_set_kernel(SixOpEnv *e, const SixOpPatchOp *op, int global_level);
 #endif
 
 #define TRIGGER_HIGH 4
@@ -64,7 +77,9 @@ void dx_ops_kernel(unsigned int *pf, float *fk, const float *modulation, float *
 #define DX_ENV_SCALE 0.918749988f
 #define DX_PREVIOUS_LEVEL -100.0f
 
+#ifndef PL_DX_KERNEL
 static float itof_signed(int i) { return i < 0 ? -itof_nonneg(-i) : itof_nonneg(i); }
+#endif
 
 static float as_float(int w) {
   union { int i; float f; } u;
@@ -81,6 +96,7 @@ static int float_bits(float x) {
 /* fm::Pow2Fast<1> and <2> */
 static float pow2_fast_1(float x) { return as_float((int)(8388608.0f * (127.0f + x))); }
 
+#ifndef PL_DX_KERNEL
 static float pow2_fast_2(float x) {
   int x_integral = (int)x;
   float r;
@@ -91,6 +107,7 @@ static float pow2_fast_2(float x) {
   r = 1.0f + x * (0.6565f + x * 0.3435f);
   return as_float(float_bits(r) + (x_integral << 23));
 }
+#endif
 
 /* stmlib::SemitonesToRatioSafe */
 static float semitones_to_ratio_safe(float semitones) {
@@ -125,6 +142,9 @@ static int min99(int v) { return v < 99 ? v : 99; }
 
 static void patch_unpack(SixOpPatch *p, int bank, int index) {
   const unsigned int *b = &pl_dx7_banks[bank * PL_DX7_BANK_WORDS];
+#ifdef PL_DX_KERNEL
+  dx_unpack_kernel(p, b, index);
+#else
   int base = index << 7;
   int i, j;
   for (i = 0; i < 6; ++i) {
@@ -170,6 +190,7 @@ static void patch_unpack(SixOpPatch *p, int bank, int index) {
     p->lfo_waveform = w < 5 ? w : 5;
   }
   p->lfo_pitch_mod_sens = bank_byte(b, base + 6) >> 4;
+#endif
 }
 
 /* ---- fm::Envelope<4, reshape> */
@@ -228,6 +249,9 @@ static float env_render(SixOpEnv *e, int gate, float rate, float ad_scale, float
 
 /* OperatorEnvelope::Set */
 static void op_env_set(SixOpEnv *e, const SixOpPatchOp *op, int global_level) {
+#ifdef PL_DX_KERNEL
+  dx_env_set_kernel(e, op, global_level);
+#else
   int i;
   for (i = 0; i < 4; ++i) {
     int level_scaled = (int)pl_dx_op_level[op->env_level[i]];
@@ -256,6 +280,7 @@ static void op_env_set(SixOpEnv *e, const SixOpPatchOp *op, int global_level) {
     }
     e->increment[i] = increment * DX_ENV_SCALE;
   }
+#endif
 }
 
 /* PitchEnvelope::Set */
@@ -431,6 +456,7 @@ static int voice_setup(SixOpVoice *v) {
   return 1;
 }
 
+#ifndef PL_DX_KERNEL
 /* fm::KeyboardScaling */
 static float keyboard_scaling(float note, const SixOpPatchOp *op) {
   float x = note - itof_nonneg(op->kb_break_point) - 15.0f;
@@ -448,6 +474,7 @@ static float keyboard_scaling(float note, const SixOpPatchOp *op) {
   depth = itof_nonneg(x > 0.0f ? op->kb_right_depth : op->kb_left_depth);
   return t * depth * 0.02677f;
 }
+#endif
 
 /* fm::NormalizeVelocity: Interpolate(lut_cube_root, velocity, 16) */
 static float normalize_velocity(float velocity) {
@@ -456,6 +483,7 @@ static float normalize_velocity(float velocity) {
   return 16.0f * (cube_root - 0.918f);
 }
 
+#ifndef PL_DX_KERNEL
 /* fm::RenderOperators<n, modulation_source, additive> (n <= 3), one function for the eight variants. */
 static void render_ops(int n, int ms, int additive, unsigned int *ops_phase, float *ops_amplitude, const float *f,
                        const float *a, float *fb_state, int fb_amount, const float *modulation, float *out,
@@ -479,39 +507,6 @@ static void render_ops(int n, int ms, int additive, unsigned int *ops_phase, flo
   }
   fb_scale = fb_amount != 0 ? itof_nonneg(1 << fb_amount) * 0.001953125f : 0.0f;
 
-#ifdef PL_DX_KERNEL
-  {
-    int variant = -1;
-    if (n == 1 && ms >= -2 && ms <= 0) {
-      variant = (ms + 2) * 2 + (additive != 0 ? 1 : 0);
-    } else if (n == 3 && ms == 2 && additive != 0) {
-      variant = 6;
-    } else if (n == 2 && ms == 1 && additive != 0) {
-      variant = 7;
-    }
-    if (variant >= 0 && size > 0) {
-      unsigned int pf[6];
-      float fk[9];
-      for (i = 0; i < 3; ++i) {
-        pf[i] = i < n ? phase[i] : 0u;
-        pf[3 + i] = i < n ? frequency[i] : 0u;
-        fk[i] = i < n ? amplitude[i] : 0.0f;
-        fk[3 + i] = i < n ? amplitude_increment[i] : 0.0f;
-      }
-      fk[6] = previous_0;
-      fk[7] = previous_1;
-      fk[8] = fb_scale;
-      dx_ops_kernel(pf, fk, modulation, out, size, variant);
-      for (i = 0; i < n; ++i) {
-        phase[i] = pf[i];
-        amplitude[i] = fk[i];
-      }
-      previous_0 = fk[6];
-      previous_1 = fk[7];
-      size = 0; /* the loop below is done */
-    }
-  }
-#endif
   for (k = 0; k < size; ++k) {
     float pm = 0.0f;
     if (ms >= 0) {
@@ -550,6 +545,7 @@ static void render_ops(int n, int ms, int additive, unsigned int *ops_phase, flo
 static const int dx_render_n[8] = {1, 1, 1, 1, 1, 1, 3, 2};
 static const int dx_render_ms[8] = {-2, -2, -1, -1, 0, 0, 2, 1};
 static const int dx_render_add[8] = {0, 1, 0, 1, 0, 1, 1, 1};
+#endif
 
 /* Voice<6>::Render(parameters, temp, size): the three buffers are temp, temp + size, temp + 2 * size */
 static void voice_render(SixOpVoice *v, float *temp, int size) {
@@ -568,9 +564,26 @@ static void voice_render(SixOpVoice *v, float *temp, int size) {
     /* a CPU-overrun guard upstream: a new patch's setup block is a clean blank */
     return;
   }
+#ifdef PL_DX_KERNEL
+  {
+    DxVoiceK k;
+    k.scale = 1.0f / itof_nonneg(size);
+    k.fb_scale = patch->feedback != 0 ? itof_nonneg(1 << patch->feedback) * 0.001953125f : 0.0f;
+    k.size = size;
+    k.calls = pl_dx_calls;
+    k.modmask = pl_dx_modmask;
+    k.amp_mod_lut = pl_dx_lut_amp_mod;
+    k.ratio_high = pl_lut_pitch_ratio_high;
+    k.ratio_low = pl_lut_pitch_ratio_low;
+    k.cube_root = pl_dx_lut_cube_root;
+    dx_voice_kernel(v, temp, &k);
+  }
+#else
+#ifndef PL_DX_KERNEL
   buffers[0] = temp;
   buffers[1] = temp + size;
   buffers[2] = temp + 2 * size;
+#endif
 
   envelope_rate = itof_nonneg(size);
   ad_scale = pow2_fast_1((0.5f - v->p_envelope_control) * 8.0f);
@@ -627,6 +640,7 @@ static void voice_render(SixOpVoice *v, float *temp, int size) {
                &f[i], &a[i], v->feedback_state, patch->feedback, buffers[input_index], buffers[output_index], size);
     i += n;
   }
+#endif
 }
 
 /* ---- SixOpEngine */
@@ -682,7 +696,9 @@ int six_op_patch_index(float harmonics) {
   return lo;
 }
 
+#ifndef PL_DX_KERNEL
 static float soft_clip(float x) { return SoftClip(x); }
+#endif
 
 void six_op_render(SixOp *s, const Params *p, float *out, float *aux, int size) {
   int patch_index = six_op_patch_index(p->harmonics);
@@ -714,15 +730,22 @@ void six_op_render(SixOp *s, const Params *p, float *out, float *aux, int size) 
   }
 
   /* Staggered rendering: the carry of the previous call, then one voice for 2 * size samples. */
+#ifdef PL_DX_KERNEL
+  dx_pre_kernel(s->temp, s->acc, size);
+#else
   for (k = 0; k < size; ++k) {
     s->temp[k] = s->acc[k];
   }
   for (k = size; k < 2 * size; ++k) {
     s->temp[k] = 0.0f;
   }
+#endif
   s->rendered_voice = (s->rendered_voice + 1) & 1;
   voice_render(&s->voice[s->rendered_voice], s->temp, size * 2);
 
+#ifdef PL_DX_KERNEL
+  dx_post_kernel(s->temp, out, aux, s->acc, size);
+#else
   for (k = 0; k < size; ++k) {
     float y = soft_clip(s->temp[k] * 0.25f);
     out[k] = y;
@@ -731,4 +754,5 @@ void six_op_render(SixOp *s, const Params *p, float *out, float *aux, int size) 
   for (k = 0; k < size; ++k) {
     s->acc[k] = s->temp[size + k];
   }
+#endif
 }
