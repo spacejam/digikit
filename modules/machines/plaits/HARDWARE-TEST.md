@@ -953,3 +953,53 @@ lower (OPTIMIZING.md, 2026-10-23).
    on H-opt8; SWARM keeps its continuous grains; DX7 releases at note-off.
 3. Six DX7 tracks on one step, then eight. Expected: no dropouts at six; report the first track count that crackles.
 4. A stereo sample (ONESHOT) on a neighbouring track alongside four PLAITS tracks. Expected: it plays normally.
+
+## Release checklist (final PLAITS image)
+
+Image: the release candidate built from plaits/design (see the image table). Create a new project after flashing.
+
+1. The unit boots; the splash shows.
+2. A walk through all 25 models (MODEL knob order: ... DX7-1, DX7-2, DX7-3, DX7-4, TERRAIN, STRING MACHINE, SQUARE).
+   Each sounds; the MODEL bar reaches the top at SQUARE.
+3. DX7: HARMONICS names in the knob header and the inline label, including while holding a trig (RECORD on) on a step
+   whose MODEL is p-locked to another DX7 bank or to a non-DX7 model (shows the number). Held notes release on note-off.
+4. SRC+YES on a PLAITS track changes MODEL, HARMONICS, TIMBRE and MORPH only; on a stock machine as before.
+5. Pressing SRC repeatedly stays on the one PLAITS page.
+6. A stereo sample on a Oneshot track next to several PLAITS tracks keeps its stereo image (no cross-track corruption).
+7. Multi-track: see "What fits" below; e.g. 4 KICK + 2 RINGS + CHORD should now be clean.
+8. Recovery: hold FUNC at power-on, press TRIG 4, and use Transfer's legacy mode over MIDI DIN.
+
+## What fits (calibrated estimate)
+
+The emulator's high-bound projection of 8 tracks of one model, with warm caches (the projection closest to the unit:
+8 KICK measured 91.7 % on the unit's calibration path), the per-voice share over the stock baseline (48.6 %), and the
+number of tracks of that model expected to stay clean (≤ about 87 %, the calibrated choppy threshold). Mixed kits add
+up per voice. DUST's figure is its model-change block; its steady state is lower. Estimates, not measurements.
+
+| Model | 8 tracks, projected (warm) | Per voice | Tracks that fit clean (est.) |
+|---|---|---|---|
+| SQUARE | 77 % | 3.5 % | 10 |
+| ASYM-TRI | 80 % | 3.9 % | 9 |
+| 2FM | 82 % | 4.2 % | 9 |
+| NOISE | 83 % | 4.3 % | 8 |
+| KICK | 85 % | 4.5 % | 8 |
+| DX7-1 | 86 % | 4.7 % | 8 |
+| DX7-2 | 85 % | 4.5 % | 8 |
+| DX7-4 | 84 % | 4.4 % | 8 |
+| ADDITIVE | 88 % | 4.9 % | 7 |
+| RINGS | 90 % | 5.2 % | 7 |
+| HIHAT | 90 % | 5.2 % | 7 |
+| DX7-3 | 88 % | 4.9 % | 7 |
+| FORMANT | 99 % | 6.3 % | 6 |
+| WAVETABLE | 93 % | 5.5 % | 6 |
+| CHORD | 99 % | 6.3 % | 6 |
+| SPEECH | 97 % | 6.0 % | 6 |
+| SNARE | 93 % | 5.5 % | 6 |
+| VCF-VA | 94 % | 5.7 % | 6 |
+| PHASE-DIST | 94 % | 5.7 % | 6 |
+| TERRAIN | 98 % | 6.2 % | 6 |
+| VA | 103 % | 6.8 % | 5 |
+| SWARM | 105 % | 7.0 % | 5 |
+| STRING | 102 % | 6.7 % | 5 |
+| STRING MACH | 113 % | 8.1 % | 4 |
+| DUST | 128 % | 9.9 % | 3 |
