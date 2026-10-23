@@ -26,7 +26,7 @@
     .equ O_OWN,    52          | Digitone II: the DSP is told the entry's own type (unused here)
     .equ O_NAME,   56          | pointer to the display name (C string)
     .equ O_SNAME,  60          | pointer to the short label (C string)
-    .equ ROWSIZE,  64
+    .equ ROWSIZE,  68
     .equ SLICE,    6           | the stock type whose `type == 6` tests an added clone of it also passes
     .equ MAXN,     32          | registry max
     .equ REPSIZE,  48          | bytes per std::string representation in mf_strbuf

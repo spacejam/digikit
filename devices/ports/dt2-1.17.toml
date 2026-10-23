@@ -39,6 +39,16 @@ excludes = [[0x200fa000, 0x200fe000]]
 mark = "D"
 
 [[anchor]]
+name = "cf.intro.scenes"
+cpu = "cf"
+kind = "data"
+addr = 0x402a1b64
+len = 80
+sha256 = "d89e9947df098bc849df63261d8366878119a67328bd7a8b6c651ab7ee699750"
+mark = "D"
+rule = "ui/boot-splash:cf_words"
+
+[[anchor]]
 name = "cf.machines.clone.0"
 cpu = "cf"
 kind = "code"
@@ -169,6 +179,16 @@ mark = "D"
 rule = "core/machines:cf_func"
 
 [[anchor]]
+name = "cf.machines.curtrack"
+cpu = "cf"
+kind = "code"
+addr = 0x4004abb8
+len = 6
+sha256 = "8d1503d38f264a9b0be0700a53c1e2e61354803cc529f54092a511ae826bca7f"
+mark = "D"
+rule = "core/machines:cf_func"
+
+[[anchor]]
 name = "cf.machines.dispatch"
 cpu = "cf"
 kind = "code"
@@ -245,6 +265,16 @@ kind = "code"
 addr = 0x400da6f8
 len = 24
 sha256 = "9d6dbad381f2cc76788ae847348820f0f1429b69c3b734e64b2eb89fbd9e8475"
+mark = "D"
+rule = "core/machines:cf_func"
+
+[[anchor]]
+name = "cf.machines.pagecount"
+cpu = "cf"
+kind = "code"
+addr = 0x4006b01e
+len = 8
+sha256 = "4b41dfa21f0daad66f50f0b86f9a8881657356193312cf31e1cf76dfbada7eb9"
 mark = "D"
 rule = "core/machines:cf_func"
 
@@ -339,6 +369,27 @@ mark = "D"
 rule = "core/machines:cf_func"
 
 [[anchor]]
+name = "cf.machines.setpage"
+cpu = "cf"
+kind = "code"
+addr = 0x400691e2
+len = 8
+sha256 = "9c870a8e2217289b86c5596edbc822fb482cc92a578dc26bc353b77360f15f85"
+mark = "D"
+rule = "core/machines:cf_func"
+
+[[anchor]]
+name = "cf.machines.sourcevt"
+cpu = "cf"
+kind = "data"
+addr = 0x401edc98
+src = 0x40017620
+len = 8
+sha256 = "d57f30047659c4dc64424284043517700c7929f7daa122344041e7762b54d084"
+mark = "D"
+rule = "core/machines:cf_ptr"
+
+[[anchor]]
 name = "cf.machines.tab.list"
 cpu = "cf"
 kind = "data"
@@ -381,6 +432,26 @@ len = 7
 sha256 = "be681b64acdf467cc64cad414195a995ea4dff9ebcdad88f7e84e5e800a28e2d"
 mark = "D"
 rule = "core/machines:cf_ptr"
+
+[[anchor]]
+name = "cf.machines.trackobj"
+cpu = "cf"
+kind = "code"
+addr = 0x40035cca
+len = 6
+sha256 = "1d9bf14cdbc53525d951ca0de24a214365ee6ba6409323d2bd9a08c6cd2410fa"
+mark = "D"
+rule = "core/machines:cf_func"
+
+[[anchor]]
+name = "cf.machines.tracktype"
+cpu = "cf"
+kind = "code"
+addr = 0x4005063e
+len = 6
+sha256 = "8d1503d38f264a9b0be0700a53c1e2e61354803cc529f54092a511ae826bca7f"
+mark = "D"
+rule = "core/machines:cf_func"
 
 [[anchor]]
 name = "cf.machines.typearg.0"
@@ -963,6 +1034,36 @@ mark = "D"
 rule = "core/params:cf_params_bounds"
 
 [[anchor]]
+name = "cf.params.drawone"
+cpu = "cf"
+kind = "code"
+addr = 0x4003a768
+len = 8
+sha256 = "7357d174dda33b71e4d29ed8e6d02a3b96a76167a0a44ebe35f2a439406880f4"
+mark = "D"
+rule = "core/params:cf_func"
+
+[[anchor]]
+name = "cf.params.rand"
+cpu = "cf"
+kind = "code"
+addr = 0x401524a0
+len = 6
+sha256 = "390fe522b81ce7bab684d43d1afa2349c420f9082e4b5e01c584297427c0922d"
+mark = "D"
+rule = "core/params:cf_func"
+
+[[anchor]]
+name = "cf.params.randone"
+cpu = "cf"
+kind = "code"
+addr = 0x4003dbda
+len = 8
+sha256 = "4af777185c94ecbb051a9550fc8804cdc96128e5f3cb5654e6c409261a380a15"
+mark = "D"
+rule = "core/params:cf_func"
+
+[[anchor]]
 name = "cf.params.ref.0"
 cpu = "cf"
 kind = "data"
@@ -1543,6 +1644,16 @@ mark = "D"
 rule = "core/params:cf_func"
 
 [[anchor]]
+name = "cf.params.write"
+cpu = "cf"
+kind = "code"
+addr = 0x4003b570
+len = 6
+sha256 = "322ea8b90fa5ca869ea8d541cd645b33ea8246f15910386b4c3fea6b30e08a9a"
+mark = "D"
+rule = "core/params:cf_func"
+
+[[anchor]]
 name = "cf.reset.clear_helper"
 cpu = "cf"
 kind = "value"
@@ -1584,6 +1695,72 @@ len = 6
 sha256 = "ae63d81c7590510eecbe4b07ca65a9d9ad423a26ba301415a978a351fc4003d6"
 mark = "D"
 rule = "fx/master-drive:sharc_mem_addr"
+
+[[anchor]]
+name = "dsp.inline.after_decimate"
+cpu = "sharc"
+kind = "code"
+addr = 0x2838a4c8
+pm = 0x1c5264
+len = 6
+sha256 = "09ee6dcc09c57a250fb543bd8b0041a528659fd1b42b364ae88fe83935a6a30c"
+mark = "D"
+rule = "core/dsp-inline:sharc_func"
+
+[[anchor]]
+name = "dsp.inline.decimate"
+cpu = "sharc"
+kind = "code"
+addr = 0x2838a494
+pm = 0x1c524a
+len = 6
+sha256 = "ad928a73bda3a2307a57197eb827daad9aaa383513a1ee366988efc7052efb74"
+mark = "D"
+rule = "core/dsp-inline:sharc_func"
+
+[[anchor]]
+name = "dsp.inline.frame_base"
+cpu = "sharc"
+kind = "value"
+addr = 0x2558dc
+src = 0x283858e2
+len = 6
+sha256 = "a38cccbdf3151153d57924ae69b6dfc79d3ebdedc6e844e473f567ab30e73bda"
+mark = "D"
+rule = "core/dsp-inline:sharc_literal"
+
+[[anchor]]
+name = "dsp.inline.release_latch"
+cpu = "sharc"
+kind = "value"
+addr = 0x24f0ec
+src = 0x28386792
+len = 6
+sha256 = "be53cd57e9a3a7ea11cc5615c4a511192b6241728c2c49370804157624980e04"
+mark = "D"
+rule = "core/dsp-inline:sharc_literal"
+
+[[anchor]]
+name = "dsp.inline.trig_latch"
+cpu = "sharc"
+kind = "value"
+addr = 0x24f0cc
+src = 0x28386792
+len = 6
+sha256 = "be53cd57e9a3a7ea11cc5615c4a511192b6241728c2c49370804157624980e04"
+mark = "D"
+rule = "core/dsp-inline:sharc_literal"
+
+[[anchor]]
+name = "dsp.inline.voice_records"
+cpu = "sharc"
+kind = "value"
+addr = 0x2412cc
+src = 0x28382956
+len = 6
+sha256 = "b27d218887600dee801aff7d378add5b0353a63655972e777031729001b1ee85"
+mark = "D"
+rule = "core/dsp-inline:sharc_literal"
 
 [[anchor]]
 name = "dsp.machines.selector_data"
@@ -1660,7 +1837,7 @@ pm = 0x1c4ecf
 len = 6
 sha256 = "ac4e4f137708405f60e984913940df7406874cbc718af72ff239e60f0861abf1"
 mark = "D"
-rule = "core/dsp-voice:sharc_func"
+rule = "core/dsp-inline:sharc_func"
 
 [[anchor]]
 name = "dsp.voice.render_next"
@@ -1682,7 +1859,37 @@ src = 0x28384d9c
 len = 6
 sha256 = "aa85dee071b926c095ed94ee8bad29cc5add87caf86276bf2c85bd0e565feee4"
 mark = "D"
-rule = "core/dsp-voice:sharc_literal"
+rule = "core/dsp-inline:sharc_literal"
+
+[[anchor]]
+name = "plaits.dx7.effval"
+cpu = "cf"
+kind = "code"
+addr = 0x4006aa32
+len = 6
+sha256 = "accd8808599c96bc524d865b1af8e0e43d672b86e216ca751c848a38c2679830"
+mark = "D"
+rule = "machines/plaits:cf_func"
+
+[[anchor]]
+name = "plaits.dx7.headertext"
+cpu = "cf"
+kind = "code"
+addr = 0x4006ce92
+len = 6
+sha256 = "8ae401edd1e333c0a597021d7561154956671f337cf479bcc23a5863fe7bfb12"
+mark = "D"
+rule = "machines/plaits:cf_func"
+
+[[anchor]]
+name = "plaits.dx7.label"
+cpu = "cf"
+kind = "code"
+addr = 0x40069cc8
+len = 8
+sha256 = "93d2ec014ca2c9fd0424ddc9b053bfbe5cf686575a2c6d459a41393233d4e9a9"
+mark = "D"
+rule = "machines/plaits:cf_func"
 
 [[anchor]]
 name = "test.demo.kit_setter"

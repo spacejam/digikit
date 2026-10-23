@@ -1,0 +1,122 @@
+{
+ "arch": "cf",
+ "format": 1,
+ "relocs": [
+  {
+   "addend": 0,
+   "offset": 6,
+   "section": ".text",
+   "symbol": "_pf_first",
+   "type": "cf.32"
+  },
+  {
+   "addend": 0,
+   "offset": 12,
+   "section": ".text",
+   "symbol": "_pf_count",
+   "type": "cf.32"
+  },
+  {
+   "addend": 0,
+   "offset": 22,
+   "section": ".text",
+   "symbol": "_pf_rowsize",
+   "type": "cf.32"
+  },
+  {
+   "addend": 0,
+   "offset": 32,
+   "section": ".text",
+   "symbol": "_pf_rows",
+   "type": "cf.32"
+  },
+  {
+   "addend": 0,
+   "offset": 58,
+   "section": ".text",
+   "symbol": "_pf_rand",
+   "type": "cf.32"
+  },
+  {
+   "addend": 0,
+   "offset": 142,
+   "section": ".text",
+   "symbol": "_pf_write",
+   "type": "cf.32"
+  },
+  {
+   "addend": 0,
+   "offset": 164,
+   "section": ".text",
+   "symbol": "_pf_t_rnd",
+   "type": "cf.32"
+  }
+ ],
+ "sections": [
+  {
+   "align": 4,
+   "hex": "202f00080480000000000c800000000064000090223c000000004c01080006800000000020404aa80020670000764feffff448d7040c24484eb900000000222a0010242a0014262a00200c830000000166149481e08a52824c020000e088ee88e188d081600e2f022f012f0020434e904fef000c487800014878000142a74878ffff2f002f2f00282f2f00284eb9000000004fef001c4cd7040c4fef000c70014e754ef900000000",
+   "kind": "text",
+   "name": ".text",
+   "size": 168
+  }
+ ],
+ "source_sha256": "ed8402c0287186c9849e60dcfcc934b413f06d75345db6ebbb07f7397cf065ef",
+ "symbols": [
+  {
+   "global": true,
+   "name": "_pf_count",
+   "section": null,
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "_pf_first",
+   "section": null,
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "_pf_rand",
+   "section": null,
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "_pf_rows",
+   "section": null,
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "_pf_rowsize",
+   "section": null,
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "_pf_t_rnd",
+   "section": null,
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "_pf_write",
+   "section": null,
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "pf_randone",
+   "section": ".text",
+   "value": 0
+  }
+ ],
+ "toolchain": {
+  "as": "GNU assembler (GNU Binutils) 2.47.20260726",
+  "cflags": "-mcpu=54418 -Os -ffreestanding -fno-builtin -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-stack-protector -Wall -Wextra -Werror",
+  "gcc": "m68k-elf-gcc (GCC) 16.2.0",
+  "instructions_redecoded": "48",
+  "ld": "GNU ld (GNU Binutils) 2.47.20260726"
+ }
+}

@@ -359,8 +359,69 @@ MEMORY_RULES = {"l2_code_fill", "l2_data_fill", "ext_data_fill", "mmr_access"}
 # Commands
 
 
+def memspec_path(image: str) -> pathlib.Path:
+    """The memspec file of an image. `memspec-ea-` since the slots carry the pre-modify (effective address); the old
+    `memspec-` files hold bare I numbers and are still read by older engines."""
+    return ROOT / "out" / "clock" / "sharc" / f"memspec-ea-{image}.txt"
+
+
+def access_scale(width: str) -> int:
+    """Bytes by which a byte-space modifier is scaled for an access of this width (PRM p. 6-9, Table 6-2)."""
+    if width.startswith("byte"):
+        return 1
+    if width.startswith("short-word"):
+        return 2
+    return 4
+
+
+def memspec_slot(
+    base: str, modifier: str, u: int | None, form: str, width: str, text: str
+) -> str | None:
+    """One data access as a memspec slot: `I` (post-modify), `I+mM/S` or `I+K/S` (pre-modify), or None when the
+    base is not an I register."""
+    if not re.fullmatch(r"I\d+", base):
+        return None
+    reg = base[1:]
+    if form == "i+imm":
+        pre = "post-modify" not in text
+    elif form == "direct":
+        pre = True
+    elif form == "i,m-mod":
+        pre = u == 0
+    else:  # dual moves and the shift forms are post-modify only
+        pre = False
+    if not pre or not modifier:
+        return reg
+    s = access_scale(width or "")
+    if re.fullmatch(r"M\d+", modifier):
+        return f"{reg}+m{modifier[1:]}/{s}"
+    try:
+        k = int(modifier, 0)
+    except ValueError:
+        return reg
+    return f"{reg}+{k}/{s}"
+
+
+def memspec_slots(image: str) -> dict[int, list[str]]:
+    """Per PC the memspec slots of its data accesses, from the program database."""
+    db = sqlite3.connect(f"file:{SHARCDB / (image + '.sqlite')}?mode=ro", uri=True)
+    out: dict[int, list[str]] = defaultdict(list)
+    for sw, base, mod, u, form, width, text in db.execute(
+        "select m.sw, m.base_reg, m.modifier, m.u, m.form, m.width, i.mnemonic from mem_access m "
+        "join insn i on i.image = m.image and i.sw = m.sw where m.image = ? order by m.rowid",
+        (image,),
+    ):
+        slot = memspec_slot(
+            base or "", str(mod or ""), u, form or "", width or "", text or ""
+        )
+        if slot is not None:
+            out[sw].append(slot)
+    db.close()
+    return out
+
+
 def cmd_memspec(args) -> int:
-    """The per-PC file the engine's profile reads: `pc nbytes branch delayed [I register numbers of the data accesses]`."""
+    """The per-PC file the engine's profile reads: `pc nbytes branch delayed [slots of the data accesses]` (see `memspec_slot`)."""
     db = sqlite3.connect(f"file:{SHARCDB / (args.image + '.sqlite')}?mode=ro", uri=True)
     pcs = {
         r[0]
@@ -370,9 +431,8 @@ def cmd_memspec(args) -> int:
     }
     db.close()
     insns = load_instructions(args.image, pcs)
-    out = pathlib.Path(
-        args.out or ROOT / "out" / "clock" / "sharc" / f"memspec-{args.image}.txt"
-    )
+    slots = memspec_slots(args.image)
+    out = pathlib.Path(args.out or memspec_path(args.image))
     out.parent.mkdir(parents=True, exist_ok=True)
     lines = []
     for pc in sorted(insns):
@@ -380,7 +440,7 @@ def cmd_memspec(args) -> int:
         branch = 0
         if ins.branch in ("jump", "call", "return", "indirect", "cond_jump"):
             branch = 2 if (ins.conditional or ins.branch == "cond_jump") else 1
-        regs = [b[1:] for _, b in ins.mem if re.fullmatch(r"I\d+", b)]
+        regs = slots.get(pc, [])
         lines.append(
             f"{pc:x} {ins.nbytes} {branch} {int(ins.delayed)} {' '.join(regs)}".rstrip()
         )
@@ -393,7 +453,7 @@ def cmd_run(args) -> int:
     """Run named scenarios interpreter-only with the profile on (about 50 s of wall per audio second)."""
     out_dir = ROOT / "out" / "clock" / "sharc" / "mix"
     out_dir.mkdir(parents=True, exist_ok=True)
-    memspec = ROOT / "out" / "clock" / "sharc" / f"memspec-{args.image}.txt"
+    memspec = memspec_path(args.image)
     if not memspec.is_file():
         cmd_memspec(argparse.Namespace(image=args.image, out=None))
     status = 0

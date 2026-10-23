@@ -1,0 +1,63 @@
+{
+ "arch": "cf",
+ "format": 1,
+ "relocs": [
+  {
+   "addend": 0,
+   "offset": 16,
+   "section": ".text",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  }
+ ],
+ "sections": [
+  {
+   "align": 4,
+   "hex": "202f000472194c010000e088ee8841f900000000720012300800e18920014e75",
+   "kind": "text",
+   "name": ".text",
+   "size": 32
+  },
+  {
+   "align": 1,
+   "hex": "000102030405060708090a0b0c0d0e0f101112131415161718",
+   "kind": "data",
+   "name": ".rodata",
+   "size": 25
+  }
+ ],
+ "source_sha256": "b300a7a7ed37b183bc0732eedaaf6752af4af9d2a5a9ac56e1491429f2ba402f",
+ "symbols": [
+  {
+   "global": false,
+   "name": ".sec..rodata",
+   "section": ".rodata",
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "plaits_model_rand",
+   "section": ".text",
+   "value": 0
+  },
+  {
+   "global": false,
+   "name": "pr_end",
+   "section": ".rodata",
+   "value": 25
+  },
+  {
+   "global": false,
+   "name": "pr_models",
+   "section": ".rodata",
+   "value": 0
+  }
+ ],
+ "toolchain": {
+  "as": "GNU assembler (GNU Binutils) 2.47.20260726",
+  "cflags": "-mcpu=54418 -Os -ffreestanding -fno-builtin -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-stack-protector -Wall -Wextra -Werror",
+  "gcc": "m68k-elf-gcc (GCC) 16.2.0",
+  "instructions_redecoded": "11",
+  "ld": "GNU ld (GNU Binutils) 2.47.20260726"
+ }
+}

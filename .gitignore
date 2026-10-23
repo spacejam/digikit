@@ -77,3 +77,6 @@ apps/web/public/modules/
 *.img
 *.img.gz
 .pi/
+
+# The owner's DX7 patch bank (not firmware): DX7-4 is generated from it.
+!modules/machines/plaits/data/tyler-favorites.syx

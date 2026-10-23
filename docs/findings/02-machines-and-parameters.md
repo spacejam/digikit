@@ -1242,6 +1242,52 @@ emulator (health asserted after every input; the numbers below are 1.17):
 - The new rows are outside the owner maps: the picker and CC/NRPN logic that enumerate by owner will not list them on any type but through the descriptor.
 - DN2: not supported (a different table, 321 rows, an FM engine; the parameter-page layer is unexplored, see the assessment above).
 
+### A row's own value formatter: the `formatter` field, and PLAITS' MODEL names (DT2 1.17, 2026-10-18) **[D]**
+
+One agent, static reads plus the emulator, nothing flashed. Research:
+`.superpowers/sdd/2026-10-17-plaits-all-engines/research-model-names.md`.
+
+- **Who formats a value [D].** Every place the firmware shows a parameter value as text calls the row's `+0x34` word:
+  - `param_value_text` `0x400c8952`: it clamps the code, calls `T1[code].fmt(value, 0x4293b818)` and returns that static
+    64-byte buffer. The knob-turn header `Name=value` (`sprintf("%s=%s", ...)` at `0x4006cec0`) uses it.
+  - `ParameterSet::vfunc_23` `0x4003a89a`: it tail-jumps to the row's formatter.
+
+  The formatter pointers occur nowhere in the image but in T1. The value-class object (T2) is not involved in the text.
+- **The formatter convention, read from the stock formatters' bytes [D].** Checked on `0x400e1588` (`%d`), `0x400e22d2`
+  (Filter Type) and `0x400e2338` (Euclid operator):
+  - `void fmt(int raw, char *buf)`, cdecl: `raw` at `4(sp)`, `buf` at `8(sp)`, no length argument.
+  - Each formatter does `asr.l #8` on `raw` itself: rows hold UI values in 8.8.
+  - d0/d1/a0/a1 are scratch. `rts` returns, and the caller pops the arguments.
+  - `0x400c8952` ignores d0 after the call, and stock formatters leave different things there: sprintf's count, or
+    strcpy's destination.
+  - Stock enum formatters hard-code their strings, so no stock formatter can be reused for new names.
+- **`core/params` 0.3.0.** Both registries (DT2 and DN2) have a last field, `formatter` (u32, default 0, row size 32).
+  - Row word 13 (`+0x34`) is `$formatter | (template's +0x34 & ~(($formatter | -$formatter) >> 62))`. That is the entry's
+    function when it is non-zero, else the template's. The manifest language has no conditional, and its values are
+    64-bit.
+  - With `formatter = 0` the appended rows are unchanged, apart from the name and short pointers. Those move by 4 bytes
+    per entry, because the registry's rows grew and its string pool follows them.
+  - Measured on the PLUCK and PLAITS images against images built before the change: every other word is identical, and
+    the strings are the same. Tests: `tests/patchkit/test_plaits_model_names.py` (the patched images),
+    `tests/patchkit/test_pk_params_fw.py` (the expressions, DT2 and DN2) and `packages/patchkit/tests/frameworks.rs`.
+- **PLAITS' MODEL.** `machines/plaits` places `plaits_model_fmt` in `cf.expansion`: `src/cf/model_fmt.s`, 12 instructions
+  and a 24-entry name table, with no firmware calls, no bss and no hook.
+  - The function writes the model's name, or `ERR` when `raw >> 8` is outside 0..23 (negative values included).
+  - MODEL's row names it with `formatter = "plaits_model_fmt"` and keeps template 0xfe, so the knob draws LEV's fader.
+  - On the emulated core it follows the convention: d2-d7/a2-a6 are preserved, and exactly the name and its NUL are
+    written, for 0, 1, 23, 24, negative values and every model.
+- **Emulator [D].** PLAITS selected, the SRC page open, MODEL turned: the header reads `Model=ASYM-TRI` (also
+  `Model=VA`, `Model=2FM` and `Model=WAVETABLE`). `0x4293b818` holds the same text.
+  - The harness test is `modules/machines/plaits/tests/model_names.toml`. It passes in the cell
+    `dt2-1.17: core/machines, core/params, core/dsp-inline, machines/plaits, machines/plaits-48k`.
+  - Single slow encoder events do not move MODEL. The step count of a burst is not monotonic in its length (3 events
+    gave 1 step, 4 events 0 steps, 6 events 2 steps), so the test turns down to 0 first and then uses a fixed 3-event
+    burst.
+  - On the full SRC page, after a turn, knob B's label showed the value (`VA`) in place of `MODEL`. Whether the page
+    draws the value under a knob that was just turned is **[O]**.
+- **[O]** P-lock header. Holding TRIG 1 on the SRC page and turning MODEL showed `Model=2FM` in the same header. On the
+  SRC page, though, the trig keys select sample slots, so this was not shown to be a p-lock.
+
 ## core.machines on Digitone II 1.12 (patchkit, lane fastweb) **[D]**
 
 Emulator only, nothing flashed, one agent, not checked by a second one: **[D]** unless marked. Code:
@@ -1639,3 +1685,67 @@ the model's cursor on **row 5 (MIDI)**, while the panel still drew row 3
 (SWARMER) highlighted. YES then committed MIDI. Read the cursor (`view+420`)
 rather than trusting the panel after a held key; a shorter hold would need the
 press and release serviced closer together.
+
+## SRC+YES (randomize page), the second SRC page and the MODEL bar of added parameters (DT2 1.17, 2026-10-22) **[D]**
+
+Traced from a Ghidra 1.17 project (`~/ghidra-projects-rand/rand`, language `ColdfireEMAC`; the dump is `out/ghidra/dt2-1.17-emac`
+and the database `out/cfdb/dt2-1.17-emac.sqlite`, only one function decompiled in the dump: query the project with
+`ghidraq`), and confirmed in the emulator on the patched image.
+
+**Randomize** (why SRC+YES did nothing on PLAITS): `SourcePageView` (vtable `0x401edc98`) slot 55 `0x4001714c` calls
+`0x4004a03e(ctx, page)`, which builds the page's code list (`0x40049f96`: the track's machine descriptor through the
+dispatch `0x400c89a4`, so the added rows' codes are in it, zero and 10 are skipped) and calls the track's parameter set
+(`0x40036216`: `SoundParameterSet`, vtable `0x401f2e60`) at vtable slot 6 `0x4003a5d6`, which calls slot 7
+`ParameterSet::vfunc_7 = 0x4003dbda(this, code)` for each code. That function takes the value-class object of the code
+(T2, `0x4293c040 + code * 0x44`, accessor `0x400c892e`, which core/params maps an added code to its template's object), and
+runs the `std::function` at `+0x2c/+0x30` of it (manager and invoker; storage `+0x24`) with the row's range; the generic
+invoker is `0x400c6858`: `min + rnd15 * (max + 0x100 - min) / 0x7fff`, snapped to 0x100 unless the row's flag is set, then
+clamped. It writes the value with `0x4003b570(this, code, value, -1, 0, 1, 1)`, the call the UI uses (p-lock and undo follow).
+**[V]** Read from the running image: the T2 objects of MANUAL SLICE's TUNE (0xf8), LEV (0xfe) and the track level (0x0a) have
+no randomizer functor (words +0x24 .. +0x30 are zero), PLAY, SAMP, SLICE and LEN do; PLAITS' rows use the LEV template, so
+every added code returned 0. TUNE and LEV are not randomized on the stock machines either. The fix is core/params'
+`randomize` field and a hook on the entry of `0x4003dbda` (`src/cf/dt2/randomize.s`): 0 = the template's functor, 1 = uniform
+steps of 0x100 over the row's range, else a function `fn(rnd, min, max)` (PLAITS: the built models). `rnd` is the firmware's
+15-bit generator `0x401524a0`. In the emulator SRC+YES changes MODEL (word `0x42653334`), HARMONICS (`0x42653336`),
+TIMBRE (`0x4265333e`) and MORPH (`0x42653340`) of track 1 on the 0x100 grid and nothing else. **[V]**
+
+**Second SRC page** (core/machines `one_page`): `ParameterPageView` keeps its pages as a vector (`+0x7c .. +0x80`, one word per
+page) and the current index at `+0x90`; the count accessor is `0x4006b01e` and the setter `0x400691e2(view, page)` (clamps to
+count - 1). The page vector belongs to the view, not to the machine (SourcePageView has two pages for every machine); on a
+clone of MANUAL SLICE the second page shows the same eight controls as small bars. A row with `one_page = 1` makes both hooks
+act for SourcePageView on its track: the count is 1 (the page marker is drawn above 1) and the setter's page is 0. The
+track's type is read as the draw code does (`0x4005063e(0x40035cca(view->+0x78, 0x4004abb8(view->+0x74)))`). **[V]** three
+SRC presses on a PLAITS track give one identical frame; before, the second press showed the small-bar page. A track left on
+page 2 by another machine is put back to page 0 by the count hook. **[O]** the key handler was not read: a path that
+writes `+0x90` directly would still reach page 1 (not seen in the emulator).
+
+**MODEL bar**: the knob drawers scale `value * k / 0x7f00` (e.g. `0x400c32c0`, the fader's `(value * 14 + 0x3f80) / 0x7f00`),
+the fixed range of a level, so MODEL (0 .. 0x1800) reached 19 % of the bar. `ParameterSet::vfunc_24 = 0x4003a768(this, code,
+value, ...)` passes the value to the drawer functor (T2 `+0x14 .. +0x20`); the hook on its entry maps the value of an added
+code from `min .. max` onto 0 .. 0x7f00 (`src/cf/dt2/barscale.s`; a row of 0 .. 0x7f00 is unchanged). **[V]** frames: the
+MODEL fader is as full as HARMONICS' with both at their maxima.
+
+### PLAITS DX7 patch names (DT2 1.17, 2026-10-23) **[D]**
+
+- **Why a hook at the call site.** The formatter gets `(raw, buf)` only; `param_value_text` `0x400c8952` gets `(code, value)`. The knob-turn header
+  (the view's draw function at cfdb entry `0x4006cb14`) calls it at `0x4006ce92` (`jsr`, 6 bytes) with `a2` = the view and `d2` = the code, and it
+  obtained the value as `view->vtable[0x54](view, code, -1)`. One hook (`plaits.dx7.headertext`, module machines/plaits, `src/cf/dx7_text.s`)
+  replaces that `jsr`: for HARMONICS it reads MODEL through the same getter on the same view; for knob 18 to 21 it writes the bank's patch name into
+  the static buffer `0x4293b818` and returns through the site; else the displaced `jsr` runs. `ParameterSet::vfunc_23` (`0x4003a89a(this, code, raw,
+  buf)`) has `this` but no MODEL-safe value for p-lock contexts, and the other two callers of `param_value_text` are other views: they keep numbers. **[C]**
+  corrects finding 06's "infeasible": it was feasible with a call-site hook.
+- **One table.** `lib/gen_dx_tables.py` writes the boundaries (`pl_dx7_patch_word/thr` in `lib/dx7_banks.c`, `dx7_thr` in `src/cf/dx7_names.s`) and the
+  4 x 32 names (bytes 118..127 of each voice, trimmed). The DSP quantiser is upstream's `HysteresisQuantizer2` with hysteresis 0 (PORTING drift 28).
+- **Proofs.** All 32,513 words equal upstream's quantiser (host oracle) and the generator; the ColdFire `plaits_dx7_name` run on the emulated core over
+  every word of all four banks writes the name of the patch the DSP plays and nothing else; the hook cases (every model, other codes) keep d2-d7/a2-a6;
+  in the emulator the header names the patch for models 18..21 over a walk of HARMONICS and shows the number for 0, 17, 22 and 24
+  (tests/patchkit/test_plaits_dx7_names.py). **[O]** the p-lock header path was not exercised.
+- **The inline label (N2, 2026-10-23) [D].** The SRC page's value labels are not drawn through `param_value_text` (its three callers use code 10 and the
+  header): the cell drawer `0x40069b8e` (a view method, vtable slot 0xb4, called by the page draw `0x400740b4` and `0x40073264`) calls
+  `ParameterSet::vfunc_23(this, code, value, buf)` at `0x40069cd0` with `buf` a local. A hook on the 8 bytes before that `jsr` (anchor `plaits.dx7.label`)
+  replaces the call for HARMONICS on a DX7 model by a short name (6 characters, `short_name` in the generator; unique per bank) and a do-nothing callee.
+  The model is the **effective** one: the page computes each cell's value with `0x4006aa32(view, code, &locked)` (it finds the held trig through the view's key
+  state; with a lock it returns the step's value, else the track's, through the view getter `vtable+0x54`), and the hook calls the same function for MODEL (anchor
+  `plaits.dx7.effval`), so the label follows a held step's MODEL p-lock. Labels show values only after a knob touch; idle they show the parameter names.
+  Held-trig editing needs grid recording on (with RECORD off a trig key plays its track). Emulator test: the label of a held step equals the label of the same
+  model as the track's own model (step without lock: track's DX7-1; lock to DX7-2: bank 2 names; lock to SQUARE: the number).

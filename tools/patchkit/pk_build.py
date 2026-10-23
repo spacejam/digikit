@@ -5,7 +5,8 @@
     uv run python -m tools.patchkit.pk_build build-all [--check]
 
 For every `[[object]]` of a module's `module.toml` that lists `sources`, the sources are compiled by the
-pinned toolchain (SHARC+: Selache `selas`; ColdFire: m68k-elf gcc/as, tools/patchkit/pk_link.py), turned into the
+pinned toolchain (SHARC+: Selache `selas` for `.s`, `selcc` for `.c`, merged into one object; ColdFire: m68k-elf
+gcc/as, tools/patchkit/pk_link.py), turned into the
 canonical object JSON (sorted keys, integers only; format in packages/patchkit/src/dko.rs) and written to the
 object's `path`. Every instruction is re-decoded by our own decoders (SHARC: tools/patchkit/pk_sharc.py `verify`;
 ColdFire: tools/patchkit/pk_link.py `check_isa`), so a toolchain encoding bug cannot reach an image.
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import tempfile
 import tomllib
@@ -45,10 +47,69 @@ def canonical(obj: dict) -> str:
     return json.dumps(obj, sort_keys=True, indent=1, ensure_ascii=True) + "\n"
 
 
+def _tu_lines(sources: list[Path], texts: list[str], message: str) -> str:
+    """Rewrite `line N:` (a line of the concatenated translation unit) as `file:line:`."""
+    starts = []
+    first = 1
+    for p, t in zip(sources, texts, strict=True):
+        starts.append((first, p))
+        first += t.count("\n") + 1  # the "\n" joining the next file
+
+    def sub(m: re.Match) -> str:
+        n = int(m.group(1))
+        start, path = max((s for s in starts if s[0] <= n), key=lambda s: s[0])
+        return f"{path}:{n - start + 1}:"
+
+    return re.sub(r"\bline (\d+):", sub, message)
+
+
+def dsp_object(sources: list[Path]) -> pk_sharc.SharcObject:
+    """A DSP object from `.s` and `.c` sources: the `.s` files, concatenated in order, are one translation unit
+    (pk_sharc.assemble); each `.c` file is compiled by selcc with its own directory on the include path
+    (pk_sharc.compile_c); the pieces are merged in that order, assembly first (pk_sharc.merge)."""
+    asm = [p for p in sources if p.suffix == ".s"]
+    objs = []
+    if asm:
+        texts = [p.read_text() for p in asm]
+        try:
+            objs.append(pk_sharc.assemble("\n".join(texts)))
+        except pk_sharc.PkSharcError as e:
+            raise pk_sharc.PkSharcError(_tu_lines(asm, texts, str(e))) from e
+    for p in sources:
+        if p.suffix == ".c":
+            try:
+                objs.append(pk_sharc.compile_c(p.read_text(), include_dirs=[p.parent]))
+            except pk_sharc.PkSharcError as e:
+                raise pk_sharc.PkSharcError(f"{p}: {e}") from e
+        elif p.suffix != ".s":
+            raise BuildError(f"{p}: a DSP object takes .s and .c sources")
+    merged = pk_sharc.merge(objs)
+    check_zero_runs(merged)
+    return merged
+
+
+ZERO_RUN_LIMIT = 4096
+
+
+def check_zero_runs(obj: pk_sharc.SharcObject, limit: int = ZERO_RUN_LIMIT) -> None:
+    """Fail closed: a loaded data section (not `.PKBSS`, not an explicit `.PKDATA`) with a run of more than `limit` zero bytes
+    is zeros in the DSP boot stream (selcc emits a zero-initialised static as loaded data: a per-voice delay memory of 16 KB
+    cost 206 KB of the stream's 1,048,575-byte cap). Reserve such memory with `.PKBSS name, bytes;` (the program writes it
+    before it reads it) and reach it through an extern."""
+    for name, (blob, _align, bss) in obj.data.items():
+        if bss or name.startswith("pkdata_"):
+            continue
+        m = re.search(b"\\x00{%d,}" % (limit + 1), blob)
+        if m:
+            raise BuildError(
+                f"data section {name}: a run of {m.end() - m.start()} zero bytes at offset {m.start()} is loaded into the boot "
+                f"stream (limit {limit}); reserve big zero memory with `.PKBSS name, bytes;` in assembly instead of a C static"
+            )
+
+
 def sharc_object(sources: list[Path]) -> dict:
-    """One or more `.s` files, concatenated into one translation unit, to an object."""
-    text = "\n".join(p.read_text() for p in sources)
-    obj = pk_sharc.assemble(text)
+    """`.s` (one translation unit) and `.c` sources to the canonical object JSON."""
+    obj = dsp_object(sources)
     # ISA check: link at a placeholder base with placeholder externs; verify() re-decodes every instruction
     # and reads every relocated field back.
     undefined = sorted({r.symbol for r in obj.relocs} - set(obj.symbols))
@@ -202,7 +263,7 @@ def build_module(moddir: Path, check: bool) -> list[str]:
             continue
         paths = [moddir / s for s in srcs]
         kinds = {p.suffix for p in paths}
-        if kinds <= {".s"} and any("dsp" in Path(s).parts for s in srcs):
+        if kinds <= {".s", ".c"} and any("dsp" in Path(s).parts for s in srcs):
             obj = sharc_object(paths)
         else:
             obj = cf_object(paths)

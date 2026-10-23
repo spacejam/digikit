@@ -118,6 +118,10 @@ max_len = 23
 name = "short"
 kind = "cstr"
 max_len = 23
+[[registry.field]]
+name = "one_page"           # Digitakt II: 1 = one SRC page (src/cf/dt2/onepage.s); the second page repeats the first
+kind = "u32"
+default = 0
 
 [[claim]]
 resource = "cf.machines.sites"
@@ -308,6 +312,24 @@ _mf_c4a = "cf.machines.clone.4.alt"
 _mf_c6 = "cf.machines.clone.6"
 _mf_c6a = "cf.machines.clone.6.alt"
 
+# one SRC page for a machine with `one_page = 1` (src/cf/dt2/onepage.s)
+[[object]]
+path = "build/machines-onepage-dt2.dko.json"
+sources = ["src/cf/dt2/onepage.s"]
+place = "cf.expansion"
+devices = ["dt2"]
+
+[object.externs]
+_mo_first = "machines.first"
+_mo_count = "machines.count"
+_mo_rows = "machines.rows"
+_mo_srcvt = "cf.machines.sourcevt"
+_mo_cur = "cf.machines.curtrack"
+_mo_track = "cf.machines.trackobj"
+_mo_type = "cf.machines.tracktype"
+_mo_t_count = "hook.cf.machines.pagecount.tail"
+_mo_t_setpage = "hook.cf.machines.setpage.tail"
+
 [[object]]
 path = "build/machines-dn2.dko.json"
 sources = ["src/cf/dn2/machines.s"]
@@ -362,6 +384,26 @@ offset = 0
 to = "mf_dispatch"
 displaced = "run"
 devices = ["dn2"]
+
+# one SRC page: the page count and the page setter of the views
+
+[[op]]
+op = "hook"
+cpu = "cf"
+anchor = "cf.machines.pagecount"
+offset = 0
+to = "mo_count"
+displaced = "run"
+devices = ["dt2"]
+
+[[op]]
+op = "hook"
+cpu = "cf"
+anchor = "cf.machines.setpage"
+offset = 0
+to = "mo_setpage"
+displaced = "run"
+devices = ["dt2"]
 
 # list builder: the tables exist before it runs; it copies mf_list_buf (stock order plus the machines at their positions)
 
@@ -1041,6 +1083,70 @@ cpu = "sharc"
 kind = "sharc_literal"
 reloc_hash = "d2c02a587786f9ee328897985095c271ff1c5b65f289224e435968ea4b5d3f00"
 offset = 0x248
+mark = "D"
+
+# one SRC page (1.17; src/cf/dt2/onepage.s): the view's page count `(end - begin) >> 2` (entry: `movea.l 4(a7),a0; move.l
+# 0x80(a0),d0`), its page setter (the same two instructions), SourcePageView's vtable (the literal of its constructor's
+# `move.l #vtable,(a2)`) and the three accessors that give the track's machine type
+[[anchor_rule]]
+name = "cf.machines.pagecount"
+devices = ["dt2"]
+cpu = "cf"
+kind = "cf_func"
+hash = "d3bc9d5acfeb2f9193ce4607f563c4f4"
+offset = 0x0
+len = 8
+mark = "D"
+
+[[anchor_rule]]
+name = "cf.machines.setpage"
+devices = ["dt2"]
+cpu = "cf"
+kind = "cf_func"
+hash = "1f5d82f40749d76d4c32ff8f7104b96b"
+offset = 0x0
+len = 8
+mark = "D"
+
+[[anchor_rule]]
+name = "cf.machines.sourcevt"
+devices = ["dt2"]
+cpu = "cf"
+kind = "cf_ptr"
+hash = "4cc4e9c7b4dcc695b77e033ae65f1f6f"
+offset = 0xe6
+len = 8
+mark = "D"
+
+[[anchor_rule]]
+name = "cf.machines.curtrack"
+devices = ["dt2"]
+cpu = "cf"
+kind = "cf_func"
+hash = "cedb2a1ea2dbc72965b79e3f95f41157"
+ordinal = 1
+offset = 0x0
+len = 6
+mark = "D"
+
+[[anchor_rule]]
+name = "cf.machines.trackobj"
+devices = ["dt2"]
+cpu = "cf"
+kind = "cf_func"
+hash = "9fbd7b798068d1cc0a201b9060ff7250"
+offset = 0x0
+len = 6
+mark = "D"
+
+[[anchor_rule]]
+name = "cf.machines.tracktype"
+devices = ["dt2"]
+cpu = "cf"
+kind = "cf_func"
+hash = "efdd2b55b3246b302b337c760bcc57b6"
+offset = 0x0
+len = 6
 mark = "D"
 
 # Digitone II: the same framework with the sites of tools/patchkit/pk_machine_rules_dn2.py (finding 02, "core.machines on Digitone II")

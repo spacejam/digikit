@@ -1,0 +1,97 @@
+[module]
+id = "machines/plaits-96k"
+version = "0.1.0"
+name = "Plaits, 96 kHz work buffer"
+category = "machines"
+status = "experimental"
+summary = "PLAITS rendered at 48 kHz, interpolated to 96 kHz into the work buffer, then the stock decimator."
+ports = ["dt2-1.17"]
+requires = ["machines/plaits", "core/dsp-inline"]
+conflicts = ["machines/plaits-48k"]
+
+[targets]
+"dt2-1.17" = "experimental"
+
+# The PLAITS voice routine (modules/machines/plaits: the entry shim src/dsp/plaits_entry.s, the C voice wrapper and
+# engines) in mode 0: the 48 kHz block interpolated 2x by the half-band filter (src/dsp/halfband.c) into the 64-sample
+# work buffer, then the stock decimator (core/dsp-inline `_di_return_work`). src/dsp/mode.s, listed first, defines
+# PLAITS_MODE for the shim; the C sources are the same in both builds (the shim passes the output rate). Image:
+# out/patch/plaits-va-96k-1.17.syx.
+[[object]]
+path = "build/plaits-96k-dsp.dko.json"
+sources = [
+  "src/dsp/mode.s",
+  "../plaits/src/dsp/plaits_entry.s",
+  "../plaits/src/dsp/lib/resonator_svf4_sm.s",
+  "../plaits/src/dsp/lib/drums_sm.s",
+  "../plaits/src/dsp/post_sm.s",
+  "../plaits/src/dsp/lib/wavetable_sm.s",
+  "../plaits/src/dsp/lib/string_synth_sm.s",
+  "../plaits/src/dsp/lib/chord_loops_sm.s",
+  "../plaits/src/dsp/lib/phase_dist_sm.s",
+  "../plaits/src/dsp/lib/additive_sm.s",
+  "../plaits/src/dsp/lib/va_sm.s",
+  "../plaits/src/dsp/lib/grain_sm.s",
+  "../plaits/src/dsp/lib/noise_sm.s",
+  "../plaits/src/dsp/lib/dust_sm.s",
+  "../plaits/src/dsp/lib/string_machine_sm.s",
+  "../plaits/src/dsp/lib/swarm_sm.s",
+  "../plaits/src/dsp/lib/terrain_sm.s",
+  "../plaits/src/dsp/lib/fm_sm.s",
+  "../plaits/src/dsp/lib/vcf_sm.s",
+  "../plaits/src/dsp/lib/wavetable_engine_sm.s",
+  "../plaits/src/dsp/lib/svf_sm.s",
+  "../plaits/src/dsp/lib/sam_sm.s",
+  "../plaits/src/dsp/lib/ws_sm.s",
+  "../plaits/src/dsp/lib/va_mix_sm.s",
+  "../plaits/src/dsp/plaits.c",
+  "../plaits/src/dsp/engines/va.c",
+  "../plaits/src/dsp/engines/waveshaping.c",
+  "../plaits/src/dsp/engines/fm.c",
+  "../plaits/src/dsp/engines/grain.c",
+  "../plaits/src/dsp/engines/additive.c",
+  "../plaits/src/dsp/engines/wavetable.c",
+  "../plaits/src/dsp/engines/chord.c",
+  "../plaits/src/dsp/lib/tables.c",
+  "../plaits/src/dsp/lib/waves.c",
+  "../plaits/src/dsp/lib/wavetable_oscillator.c",
+  "../plaits/src/dsp/lib/string_synth_oscillator.c",
+  "../plaits/src/dsp/lib/chord_bank.c",
+  "../plaits/src/dsp/engines/speech.c",
+  "../plaits/src/dsp/lib/svf.c",
+  "../plaits/src/dsp/lib/naive_speech_synth.c",
+  "../plaits/src/dsp/lib/sam_speech_synth.c",
+  "../plaits/src/dsp/lib/lpc_speech_synth.c",
+  "../plaits/src/dsp/lib/speech_tables.c",
+  "../plaits/src/dsp/engines/modal.c",
+  "../plaits/src/dsp/lib/resonator.c",
+  "../plaits/src/dsp/engines/terrain.c",
+  "../plaits/src/dsp/engines/noise.c",
+  "../plaits/src/dsp/engines/phase_dist.c",
+  "../plaits/src/dsp/engines/vcf.c",
+  "../plaits/src/dsp/engines/square.c",
+  "../plaits/src/dsp/engines/string_machine.c",
+  "../plaits/src/dsp/engines/dust.c",
+  "../plaits/src/dsp/engines/swarm.c",
+  "../plaits/src/dsp/engines/six_op.c",
+  "../plaits/src/dsp/lib/dx_tables.c",
+  "../plaits/src/dsp/lib/dx7_banks.c",
+  "../plaits/src/dsp/engines/string_engine.c",
+  "../plaits/src/dsp/lib/ensemble.c",
+  "../plaits/src/dsp/engines/kick.c",
+  "../plaits/src/dsp/engines/snare.c",
+  "../plaits/src/dsp/engines/hihat.c",
+  "../plaits/src/dsp/lib/fast_sine_oscillator.c",
+  "../plaits/src/dsp/halfband.c",
+  "../plaits/src/dsp/lib/string_sm.s",
+  "../plaits/src/dsp/lib/dx_sm.s",
+]
+place = "dsp.l2"
+devices = ["dt2"]
+
+[[entry]]
+registry = "inline_voices"
+id = "plaits"
+type = "machines.plaits.index"
+pc = "_pl_render"
+devices = ["dt2"]

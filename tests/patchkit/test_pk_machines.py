@@ -86,7 +86,8 @@ def test_framework_rules_are_declared_once_per_site():
 
 
 @pytest.mark.skipif(
-    not os.path.exists(os.path.join(ROOT, "out", "cfdb", "dt2-1.17-emac.sqlite")),
+    not os.path.exists(os.path.join(ROOT, "out", "cfdb", "dt2-1.17-emac.sqlite"))
+    or not os.path.exists(os.path.join(ROOT, "out", "cfdb", "dt2-1.16-emac.sqlite")),
     reason="needs the 1.16 and 1.17 cfdb",
 )
 def test_rules_match_one_function_on_1_17():

@@ -5871,3 +5871,769 @@ real load is 7 (DN2) and 4 (DT2) points higher at nominal, 16 and 13 at the high
   `dsp_clock_hz` in devices/cycle-factors.json and the emulator's 666,667 instructions per 1500 Hz block match it.
 - Open **[O]**: SYS_CLKIN = 20 MHz is the firmware's value, not a board measurement; the chip marking (speed grade)
   is not read. Details and disassembly: scratchpad report of 2026-10-16 (not committed).
+
+## In-renderer hook: core/dsp-inline (DT2 1.17, 2026-10-17) **[D]**
+
+The PLAITS hook framework (`modules/core/dsp-inline`). It hooks inside the stock renderer `0x1c4ecf` instead of
+replacing it: the whole-renderer replacement of core/dsp-voice stalls the unit, the in-renderer branch does not.
+DT2 1.16 and 1.17 DSP blobs are byte-identical, so every address below holds for both.
+
+**Hardware evidence (owner's unit, OS 1.17, 2026-10-17; design doc `docs/design/2026-10-17-plaits-machine-design.md`).**
+
+| Image | What it adds | Result on the unit |
+|---|---|---|
+| `pluck-1.17` | digikit PLUCK (core/machines, core/params, core/dsp-voice) | **stalls** once the PLUCK type reaches the DSP: all audio dead, OS update from the running OS fails |
+| `diag-xslice` | an added MANUAL SLICE clone, no DSP code | works |
+| `diag-D` | PLUCK's machine and rows, no DSP routine | works (track plays the stock sample engine) |
+| `diag-E/F/H` | PLUCK with DECAY 0 / a routine that only writes zeros / stage A skipped | **stall** |
+| `diag-J` | XSLICE + dt2-machine-lab SINE hook | **stalls** |
+| `diag-K` | lab hook, custom branch continues through the stock sample reader | works |
+| `diag-L/M/N` | lab hook, custom branch writes zeros / a register saw / L2 table reads, then the stock decimator | work, M and N audible |
+| `diag-O/P` | + per-voice phase kept in L2 between blocks / + trigger-latch read | work, audible |
+| `diag-Q/R` | J without envelope / J without interpolation | Q **stalls**, R works |
+| `diag-Q1` | Q with its one negative immediate shift replaced by a register-amount shift | **works**: clean 440 Hz |
+
+The lab hook of L to Q1 is the shape core/dsp-inline keeps: a jump at SW `0x1c4f15`, the six displaced bytes
+`5499a801408c` (`R4 = DM(I4, M5)` at 0x1c4f15 and `R12 = LEFTZ R4` at 0x1c4f16, both position-independent) replayed
+before `JUMP 0x1c4f18` for every other type, `DM(-5, I6) = R0` on entry and `R0 = DM(-5, I6)` before the replay.
+
+**Renderer state at 0x1c4f15 [D, disassembly].** The prologue (`I7 = MODIFY(I7, -26) (NW)` at 0x1c4ecf) saves M1-M3,
+B3, I0-I3, I5 and R3, R5-R11, R13-R15 at DM(-8..-26, I6); 0x1c4ed2 `R1 = PASS R8`, 0x1c4f0d `DM(-6, I6) = R4` (the
+record), 0x1c4f0f `I4 = DM(-6, I6)`, 0x1c4f11 `DM(-7, I6) = R1`, 0x1c4f13 `DM(-4, I6) = R2` (= R12 = 32), and
+`R0 = R2 + R2` = 64, which the delay slot at 0x1c4f1b stores at DM(-5, I6). After 0x1c4f18 the stock code assigns
+every register before it reads it except I4 (the record), R0 (the delay-slot store) and the ASTAT flag set by the
+displaced LEFTZ; R1-R3, R5, R12 and I0 are free there.
+
+**Output pointer [D].** The voice's final 32-float output is the caller's R8, kept at **DM(-7, I6)**: the zero path
+reads it at 0x1c4f1d (`I5 = DM(-7, I6)`), the decimator entry at 0x1c5257 (`R12 = DM(-7, I6)`).
+
+**Decimator call and its continuation [D, disassembly and concrete core].** 0x1c524a `MODIFY(I7, M7)`, then
+`R8 = DM(-6, I6)` + 4 (the work buffer), `R0 = DM(-4, I6)` pushed (32), `R4 = DM(-6, I6)` + 0x104 (the decimator
+state), `R2 = 4` (pushed in a delay slot), `R12 = DM(-7, I6)` (the output); 0x1c525d `CJUMP 0xb80000 (DB)` with the
+delay slots 0x1c5260 `DM(I7, M7) = R2` and 0x1c5261 `DM(I7, M7) = PC`. The callee returns with `JUMP (M14, I12) (DB)`
+and RFRAME to **SW 0x1c5264** (`dsp.inline.after_decimate`): `JUMP 0x1c4f56 (DB)`, delay slots
+`I7 = MODIFY(I7, 2) (NW)` and NOP, then the epilogue at 0x1c4f56, which reloads the return address from DM(-1, I6),
+restores the saved registers from the frame and ends with `RETURN` and RFRAME. At 0x1c5264, I6 is the renderer's
+frame again and I7 is two words below the renderer's I7 (the pushed 32 and the CJUMP frame word); the epilogue reads
+nothing else the decimator leaves, and RFRAME resets I7 from I6. A run of `0xb80000` on the concrete core with the
+stock blob (R4 = record + 0x104, R8 = record + 4, R12 = output) returns to 0x1c5264 after 916 instructions.
+
+**What the decimator writes [D, concrete core, watchpoints].** The 32 output words, and in the record only
++0x114..+0x14b: a 4-word ring at +0x114..+0x123, eight state words at +0x124..+0x143 and the two ring indices at
++0x144 and +0x148 (`DM(I5 + 16)`, `DM(I5 + 17)`, I5 = record + 0x104). It reads its coefficients at DM 0x26ef88..
+0x26ef94 and ignores the two stack arguments. This settles the [O] of "The voice record contract" for the
+decimator state in favour of (b). A routine that writes the output itself (core/dsp-inline mode 1) leaves this state as
+it was; nothing else in the record is the decimator's.
+
+**Trigger latch [D, concrete core, frame replay].** 32 bytes at **DM 0x24f0cc**, byte 0x24f0cc + v for voice v. The
+voice setup loop of FUN_1c642a reads byte v at 0x1c6545 (`R2 = DM(I1, M4)`, I1 = 0x24f12c + v, M4 = -0x60) and arms
+the voice (`CALL 0x1c4eaf`) when it is non-zero; nothing writes the latch between that read and the render loop
+(0x1c6ae8..0x1c6b09), so the renderer sees it in the same block. At the end of FUN_1c642a the SIMD loop at
+0x1c7191..0x1c71a6 copies the pending array at 0x24f0ac (written by the trigger code, 0x1c33ce `DM(I4, M4) = M14`,
+I4 = 0x24f0ac) to the latch (0x1c71a3, +0x20) and clears the pending bytes. A replay of one render frame
+(tools/sharc_dev/sharc_harness, run_init then the block handler) with only byte 0x24f0cc + i set armed exactly voice i
+for i = 0, 5 and 31 (record +0x1b8 = 1), and the watch log shows the reads 0x24f0cc..0x24f0eb at 0x1c6545, one per
+voice in record order. The lab read `(DM(0x24f0cc) >> 8v) & 0xff` for v = 0 and 1 is the same layout.
+
+**core/dsp-inline as built [D, concrete core; not yet flashed].**
+- Hook `dsp.voice.render_entry` + 0x8c (SW 0x1c4f15), displaced = run, `expect_sha256` of the six bytes; the
+  fallback is patchkit's tail `hook.dsp.voice.render_entry.140.tail` (the six bytes, `JUMP 0x1c4f18`).
+- Voice v = (record - 0x2412cc) / 0x1d8 by subtraction (records outside the 32 take the stock path), track v >> 1,
+  type = the 16-bit cache entry of the track at 0x255970 (aligned word, register-amount shift); registry
+  `inline_voices` rows {type, pc}, max 16, terminator.
+- Routine ABI (modules/core/dsp-inline/src/dsp/dsp-inline.s): in R4 = record, R0 = v, R2 = track, R1 = type, I1 = record + 4, I2 = the output
+  (DM(-7, I6)); entered with `JUMP (M13, I12)` (stock word `083f283f`). **[C]** (Task 5b, 2026-10-17) A routine returns
+  with a direct jump (type 8a) to a hook label, not with `JUMP (M13, I13)` and an R0 mode: `_di_return_work` (64 floats
+  at 96 kHz in the work buffer, continue at 0x1c524a) or `_di_return_out` (32 floats at 48 kHz in the output,
+  `I7 = MODIFY(I7, -2) (NW)`, continue at 0x1c5264); `JUMP (M13, I13)` never occurs in stock code (docs/findings/20).
+  Helpers `_di_frame_hw(k)` and `_di_trig(v)`.
+- New anchors: `dsp.inline.decimate` (0x1c524a), `dsp.inline.after_decimate` (0x1c5264), `dsp.inline.trig_latch`
+  (literal 0x24f0ac at 0x1c33c9 plus 0x20; port_resolve's `sharc_literal` takes an `add`), `dsp.inline.frame_base`
+  (0x2558dc), `dsp.inline.voice_records` (literal 0x2412cc at 0x1c14ab).
+- Patched 1.17 image (core/dsp-inline + core/machines) passes the encoding gate. In the patched image's own code on the
+  concrete core, an idle voice renders as stock, and a registered test routine in both modes returns to the voice loop
+  (0x1c6b06) with the caller's registers and frame restored (tests/patchkit/test_dsp_inline.py).
+- Open **[O]**: mode 1 (`_di_return_out`, skipping the decimator) is not yet tried on the unit; its decimator state
+  stays stale across a switch back to mode 0 or to a stock type.
+
+## machines/plaits on core/dsp-inline: the circular stack and ACTIVE (2026-10-17) **[D]**
+
+- **The firmware's C stack is a circular buffer.** Its startup sets `B7 = 0x26f000`, `L7 = 0x1fd`, `B6 = B7`,
+  `L6 = L7` (SW 0x1c0f64..0x1c0f76; a second path loads them from a table at SW 0xb885cf..0xb885de), and MODE1 has
+  CBUFEN (bit 24) on. A routine that moves I7 to a stack of its own (machines/plaits' `_pl_stack` in L2) has every
+  post-modify push and every `MODIFY(I6|I7, n)` wrapped by L: in the emulator the first `DM(I7, M7) = R0` on the new
+  stack moved I7 down by 0xf8c bytes instead of 4, the C frames landed in the voice state and the first return jumped
+  to SW 0x8c017d (native trap "no decoded instruction"; on the unit, a stall). The PLAITS entry shim saves L6/L7, sets
+  them to 0 for the C call and restores them; the concrete-core rigs (tests/support/plaits_rig.py) now run with the
+  firmware's circular registers and MODE1, which fails the shim without that fix. The concrete core wraps a
+  load/store post-modify only under CBUFEN and only by the manual's compare against B and B + L.
+- **ACTIVE (+0x1b8) never clears under an inline type.** Emulator, image h1b (ITONE, a MANUAL SLICE clone on
+  core/dsp-inline): ACTIVE of voices 0 and 1 is 0 at boot, 1 50 ms into a held trig, and still 1 three seconds after
+  the release; word +0 holds the track's sample pointer. Its writers are the arm `0x1c4eaf` (set by the trigger latch)
+  and the stock renderer `0x1c4f81` (cleared at the end of a sample), and the hook replaces the renderer after the
+  prologue, so nothing clears it. Also measured: changing the track's machine without a trig leaves the DSP's type
+  cache unchanged (finding above: the type reaches the DSP at the next trig). PLAITS therefore renders a voice when it
+  was triggered under PLAITS (its own armed flag) **and** ACTIVE is set: ACTIVE drops only when a stock type played
+  a sample to its end in between, which the image test
+  `test_image_away_on_a_stock_type_clears_active_and_plaits_stays_silent_until_trig` runs through the stock renderer.
+
+## PLAITS: measured DSP load per block (final fix wave, 2026-10-17) **[D]**
+
+One agent, emulator only (not silicon). Each configuration runs on the coupled daemon through the harness
+(`pk_harness` Session from the ready state out/ready-pk-dt2-117, `SHARC_GEN_DIR=out/native/shared-core/gen`) with the
+engine's `SHARC_CYCMIX` profile, interpreter only (`SHARC_AOT=0 SHARC_FAST_REGIONS= SHARC_BLOCKTRANS=`), and is costed
+with `tools/sharc_dev/sharc_cpi.py`'s rules (`cost_profile`, the same as "Real cycles per DSP block" above) against a
+program database of the image itself: `sharcdb build --blocks 56,69,76,78,80,88,91,93,103,104,107` over the patched
+section 7 (blocks 103, 104 and 107 are core/dsp-inline, the PLAITS object and the hook tail; the first 8 instructions
+of `_pl_render` stay undecoded by the database's depth rule, about 370 of 330,000 instructions per block, costed at one
+cycle). `sharc_cpi run` itself cannot run these images: it plays named scenarios on stock firmware with a DSP-only
+`--dsp-patch`, and PLAITS needs the ColdFire side (machine selection). Each configuration ran twice, identical up to a
+window of 500 or 2,500 ms after the last trig; the figures are (second - first) / 3,000 blocks, so boot, reset and the
+panel steps cancel. PLAITS at default parameters (note 60, HARMONICS/TIMBRE/MORPH 0x4000, MIX 0); a track becomes
+PLAITS by FUNC+SRC 7 x DOWN, YES, and one trig (it then renders every block, above). Stock: stock 1.17 with TRIG 1 on its
+sample (the `dt2-sample-trig` setting). The busy counts agree with the `status.audio.dsp_tiers` window counters within
+0.7 %. Block = 666,667 cycles (1 GHz, 1500 blocks per second).
+
+| configuration | DSP type cache | busy instructions / block | cycles / block, low / nominal / high | load %, low / nominal / high |
+|---|---|---:|---|---|
+| stock 1.17 | `0x00000000` | 209,891 | 218,594 / 238,118 / 295,119 | 32.8 / 35.7 / 44.3 |
+| plaits-va-48k, no PLAITS track | `0x00000000` | 212,969 | 222,967 / 243,376 / 302,499 | 33.4 / 36.5 / 45.4 |
+| plaits-va-48k, 1 track | `0x0000000b` | 271,644 | 287,301 / 323,098 / 405,474 | 43.1 / 48.5 / 60.8 |
+| plaits-va-48k, 2 tracks | `0x000b000b` | 330,240 | 347,808 / 394,536 / 489,321 | 52.2 / 59.2 / 73.4 |
+| plaits-va-96k, 1 track | `0x0000000b` | 297,160 | 313,336 / 359,400 / 443,696 | 47.0 / 53.9 / 66.6 |
+| plaits-va-96k, 2 tracks | `0x000b000b` | 381,272 | 400,485 / 468,359 / 570,674 | 60.1 / 70.3 / **85.6** |
+
+- **Per PLAITS track** (against stock, from the 2-track runs): +60,175 instructions and 64,607 / 78,209 / 97,101
+  cycles at 48 kHz; +85,691 instructions and 90,946 / 115,121 / 137,777 cycles at 96 kHz. Cycles per added instruction:
+  1.07 / 1.30 / 1.61 (48k), 1.06 / 1.34 / 1.61 (96k), against the stock mix's 1.13 / 1.41 at nominal / high: the
+  compiled C stalls more than the stock code, so projecting it with the stock factor (as the Task 6 estimate did)
+  is low at the high bound. The 1-track runs give higher ratios (1.79 / 1.70 high) because they also carry the
+  hook's own cost (+3,078 instructions per block on plaits-va-48k with no PLAITS track and no trig, against stock
+  with its sample trig played out: the voice loop's table walk).
+- **Worst-case parameters.** The concrete core's worst block is 76,236 instructions (48k) and 99,771 (96k)
+  (tests/patchkit/test_plaits_module.py `test_extreme_parameters_compiled_core`), 27 % and 16 % above the default
+  setting measured here. At the 2-track ratios that is 81.2 % high for 2 tracks at 48 kHz (85.1 % with the 1-track
+  ratio) and 92 to 95 % for 2 tracks at 96 kHz; 1 track at 96 kHz is 68 to 70 %.
+- **Limits** against `DEFAULT_BUDGET_PCT = 85.0` (tools/patchkit/pk_dsp_budget.py, judged on the high bound): at
+  most **2 tracks triggered as PLAITS on the 48k image** (73.4 % measured; the worst-case parameters reach the
+  budget, 81 to 85 %) and **1 on the 96k image** (2 tracks measure 85.6 % at default parameters). 3 tracks at 48 kHz
+  project to 100 to 106 % high at the worst case. The high bound rests on the assumed L2/DDR latencies (section above).
+
+## PLAITS model 1 (ASYM-TRI): measured DSP load per block (Task 7, 2026-10-17) **[D]**
+
+One agent, emulator only, the method of the section above unchanged (paired 500 / 2,500 ms windows, `SHARC_CYCMIX`,
+`sharc_cpi.cost_profile` against `sharcdb build --blocks 56,69,76,78,80,88,91,93,103,104,107` of the patched image; the
+H3 image keeps those block indices). Image `out/patch/plaits-2models-48k-1.17.syx` (machines/plaits-48k with VA and
+ASYM-TRI); each PLAITS track set to MODEL 1 (row value 0x100) by knob B before its counted trig, the other knobs at
+their defaults (0x4000). Stock baseline: the section above's stock runs.
+
+| configuration | DSP type cache | busy instructions / block | cycles / block, low / nominal / high | load %, low / nominal / high |
+|---|---|---:|---|---|
+| plaits-2models-48k, 1 track ASYM-TRI | `0x0000000b` | 250,991 | 268,327 / 300,769 / 396,851 | 40.2 / 45.1 / 59.5 |
+| plaits-2models-48k, 2 tracks ASYM-TRI | `0x000b000b` | 288,936 | 310,876 / 352,473 / 476,974 | 46.6 / 52.9 / **71.5** |
+
+- **Per ASYM-TRI track** (2-track runs, against stock): +39,523 instructions and 46,141 / 57,178 / 90,927 cycles, so
+  1.17 / 1.45 / 2.30 cycles per added instruction (1-track runs: 1.21 / 1.52 / 2.48). Fewer instructions than VA
+  (+60,175), but more stalls per instruction at the high bound: every sample reads seven table words (waveshaper,
+  two wavefolders, sine) from L2, which the high bound's latencies charge. At the high bound one ASYM-TRI track costs
+  about as many cycles as one VA track (90,900 to 101,700 against 97,100).
+- **Worst case.** The concrete core's worst ASYM-TRI block is 42,307 instructions at 48 kHz (65,842 with the
+  half-band) (tests/patchkit/test_plaits_module.py `test_extreme_parameters_compiled_core_asym_tri`; VA's is now
+  76,249 / 99,784, 13 above H2 for the model dispatch). At the measured ratios: 2 ASYM-TRI tracks 73.5 to 75.7 % high,
+  3 tracks 88 to 91 % high; one VA plus one ASYM-TRI track at their worst about 78 % high; 2 VA tracks stay the
+  heaviest pair (81.2 %, 85.1 % with the 1-track ratio, section above).
+- **Limit unchanged:** VA remains the heaviest ported model, so the 48k rule stays **at most 2 tracks triggered as
+  PLAITS since boot**, any mix of models. No 96k image carries ASYM-TRI to the owner.
+
+## PLAITS models 2 to 4 (2FM, FORMANT, ADDITIVE): measured DSP load per block at worst-case knobs (Task 8, 2026-10-18) **[D]**
+
+One agent, emulator only, the method of the two sections above (paired 500 / 2,500 ms windows, `SHARC_CYCMIX`,
+`sharc_cpi.cost_profile` against `sharcdb build --blocks 56,69,76,78,80,88,91,93,103,104,107` of the patched image; the
+H3b image keeps those block indices, block 104 now 72,496 bytes). Image `out/patch/plaits-5models-48k-1.17.syx`
+(machines/plaits-48k with models 0 to 4). Unlike the earlier runs, each PLAITS track is set to the knobs of the model's
+worst block on the concrete core (tests/patchkit/test_plaits_module.py `test_extreme_parameters_compiled_core_new_models`,
+all at note 127 + TUNE 0x7f00): TUNE at its maximum 0x7c00 (note 60 + 60; the panel stops there) and 2FM HARMONICS,
+TIMBRE, MORPH 0 / 0 / 0, FORMANT 0x7f00 / 0x7f00 / 0, ADDITIVE 0 / 0x7f00 / 0x7f00, then the counted trig. Stock
+baseline: the stock runs of "PLAITS: measured DSP load per block".
+
+| configuration | DSP type cache | busy instructions / block | cycles / block, low / nominal / high | load %, low / nominal / high |
+|---|---|---:|---|---|
+| plaits-5models-48k, 1 track 2FM, worst knobs | `0x0000000b` | 268,891 | 284,795 / 316,185 / 404,198 | 42.7 / 47.4 / 60.6 |
+| plaits-5models-48k, 1 track FORMANT, worst knobs | `0x0000000b` | 293,715 | 309,334 / 343,226 / 435,970 | 46.4 / 51.5 / 65.4 |
+| plaits-5models-48k, 1 track ADDITIVE, worst knobs | `0x0000000b` | 299,018 | 314,780 / 359,644 / 447,572 | 47.2 / 53.9 / 67.1 |
+| plaits-5models-48k, 2 tracks FORMANT, worst knobs | `0x000b000b` | 374,366 | 391,807 / 435,199 / 548,835 | 58.8 / 65.3 / 82.3 |
+| plaits-5models-48k, 2 tracks ADDITIVE, worst knobs | `0x000b000b` | 385,069 | 403,732 / 470,075 / 577,448 | 60.6 / 70.5 / **86.6** |
+
+- **Per track** (against stock; 1-track runs, which also carry the hook's own cost): 2FM +59,001 instructions and
+  66,201 / 78,068 / 109,078 cycles (1.85 cycles per instruction at the high bound); FORMANT +83,824 and 90,741 /
+  105,108 / 140,850 (1.68); ADDITIVE +89,128 and 96,186 / 121,526 / 152,452 (1.71). From the 2-track runs: FORMANT
+  +82,238 (1.54), ADDITIVE +87,589 (1.61). The emulated per-track counts agree with the concrete core's worst blocks
+  (57,442, 80,917, 88,288 instructions at 48 kHz) within 4 %.
+- **Safety rule (85 % of the block at the high bound):** one track of each model at its worst knobs is 60.6, 65.4 and
+  67.1 %, so all three are enabled. Two ADDITIVE tracks at worst knobs measure 86.6 % (87.0 % projected from the
+  concrete core's worst block), over the budget; two FORMANT tracks 82.3 %; two 2FM tracks project to 77.0 %. VA's
+  worst pair (81 to 85 %, the first section) is no longer the heaviest.
+- **Limit:** ADDITIVE is the heaviest enabled model, and two of its tracks exceed 85 %, so the rule on the H3b image is
+  **at most 1 track triggered as PLAITS since boot** (it was 2 on H2 and H3). Projected with the measured ratios,
+  a pair of tracks among VA, ASYM-TRI, 2FM and FORMANT stays at about 85 % or under at the high bound (VA's pair is
+  81 to 85 %, VA + FORMANT 81 to 84 %, with the 2-track and the 1-track ratios); a pair with ADDITIVE reaches
+  the budget or goes over it (VA + ADDITIVE 84 to 86 %, two ADDITIVE 86.6 % measured). The rule counts
+  tracks, not models, so the owner image takes the simple limit; a model-aware rule is the owner's call.
+- **Code shape.** Selache's C has no optimiser and no inlining, so the hot loops of 2FM and ADDITIVE are written out
+  (the interpolators' steps, the downsampler, SinePM's conversions, SineNoWrap) with the same float operations in the
+  same order as upstream; the host test stays bit exact. That took 2FM from 91,600 to 55,500 instructions per block
+  and ADDITIVE from 120,800 to 86,000 at one high setting; ADDITIVE's 36 harmonics x 32 samples still cost about 29
+  instructions each (every variable lives on the stack).
+
+## PLAITS models 5 and 6 (WAVETABLE, CHORD): measured DSP load per block at worst-case knobs (Task 9, 2026-10-18) **[D]**
+
+One agent, emulator only, the method of the models 2 to 4 section (paired 500 / 2,500 ms windows, `SHARC_CYCMIX`,
+`sharc_cpi.cost_profile` against `sharcdb build --blocks 56,69,76,78,80,88,91,93,103,104,107` of the patched image;
+block 104 now 193,760 bytes, code and the PLAITS tables). Image `out/patch/plaits-7models-48k-1.17.syx` (H3c,
+machines/plaits-48k with models 0 to 6, sha256 09ac59c0…). TUNE at the panel maximum 0x7c00 for each track, then
+WAVETABLE HARMONICS / TIMBRE / MORPH 0x7f00 / 0x4000 / 0x4000 (the concrete core's worst block is flat across knobs:
+41,168 instructions at 48 kHz, note 127 + TUNE 0x7f00); CHORD 0 / 0 / 0x3c00 (MORPH inside the crossfade between its
+divide-down and wavetable voices, where both kinds of voice render: 51,800 on the core; a partial scan found up to
+55,083 at TIMBRE 0x7f00). Stock baseline: the stock runs of "PLAITS: measured DSP load per block".
+
+| configuration | DSP type cache | busy instructions / block | cycles / block, low / nominal / high | load %, low / nominal / high |
+|---|---|---:|---|---|
+| plaits-7models-48k, 1 track WAVETABLE, worst knobs | `0x0000000b` | 253,300 | 277,165 / 316,029 / 449,313 | 41.6 / 47.4 / 67.4 |
+| plaits-7models-48k, 1 track CHORD, worst knobs | `0x0000000b` | 266,829 | 283,471 / 315,646 / 401,234 | 42.5 / 47.3 / 60.2 |
+| plaits-7models-48k, 2 tracks WAVETABLE, worst knobs | `0x000b000b` | 293,531 | 319,473 / 364,871 / 511,610 | 47.9 / 54.7 / 76.7 |
+| plaits-7models-48k, 2 tracks CHORD, worst knobs | `0x000b000b` | 320,607 | 338,599 / 376,997 / 470,073 | 50.8 / 56.5 / 70.5 |
+
+- **Per track** (against stock; 1-track runs carry the hook's own cost): WAVETABLE +43,409 instructions and 58,571 /
+  77,912 / 154,193 cycles, **3.55 cycles per instruction at the high bound** (the eight 4-point Hermite reads per
+  sample from a 101 KB table in L2: the high bound charges every L2 load its assumed latency); CHORD +56,938 and
+  64,878 / 77,528 / 106,115 (1.86). From the 2-track runs: WAVETABLE +41,820 (2.59), CHORD +55,358 (1.58). The
+  emulated counts agree with the concrete core (41,168 and 51,800 to 55,083 instructions) within 5 %.
+- **Safety rule (85 % at the high bound):** one track at worst knobs is 67.4 % (WAVETABLE) and 60.2 % (CHORD): both
+  are enabled. Two WAVETABLE tracks measure 76.7 % and two CHORD tracks 70.5 %, both under the budget. WAVETABLE's
+  1-track high bound (67.4 %) is now the highest single track, a hair above ADDITIVE's 67.1 %; its 2-track run is much
+  lower than the 1-track ratio projects (90.5 %), so its high-bound CPI is not additive per track.
+- **Limit:** two ADDITIVE tracks (86.6 %, the models 2 to 4 section) still exceed the budget and no new model lowers
+  it, so the rule on the H3c image stays **at most 1 track triggered as PLAITS since boot**. A model-aware rule (two
+  tracks when neither is ADDITIVE) remains the owner's call.
+- **Memory.** dsp.l2 use is 198,284 of 922,756 bytes (77,020 on H3b): the wave table as floats (101,376 bytes) and
+  its map (1,024), the CHORD tables (492), the new code, and the per-voice union at 344 bytes (CHORD; +32 per voice).
+  The boot stream is 515,276 bytes (limit 0xfffff).
+
+## PLAITS CHORD (model 6) at its worst knobs, and engines that run on between notes (Task 9b, 2026-10-18) **[D]**
+
+One agent. Task 9 measured CHORD at TIMBRE 0 and called it "worst knobs"; here the worst block is searched first on the
+concrete core (tests/support/plaits_rig.py, mode 1; scratch out/runs/task9b/chord_scan.py, chord_fine.py), then
+measured in the emulator with the method of the sections above (paired 500 / 2,500 ms windows, `SHARC_CYCMIX`,
+`sharc_cpi.cost_profile` against `sharcdb build --blocks 56,69,76,78,80,88,91,93,103,104,107` of the image).
+
+- **Search (concrete core).** TIMBRE 0x7f00, MORPH 0x3a00 to 0x4800 in steps of 0x100 (0x3b80 to 0x3d40 in steps of
+  0x40), the 11 chords (HARMONICS at each bin centre), effective notes 60 to 124 in steps of 2 (40 to 69 in steps of 1
+  for the fine MORPH values). The worst block is **55,296 instructions** (MORPH 0x3c40 or 0x3cc0, chord 0 (OCT),
+  effective note 66); 55,284 at MORPH 0x3c00. Cost rises slowly with the note (52,900 at note 40 to 55,300 at 66) and
+  falls off a cliff at note 67 (38,800): above it the top voice's divide-down oscillator is muted (`note_f0` reaches
+  0.125, `divide_down_gain` 0) and skipped. The windows of the five crossfades do not overlap, so at most one voice
+  renders both oscillators. The bound in tests/patchkit/test_plaits_module.py (62,000) stays 12 % above it.
+- **Emulator.** Image `out/patch/plaits-7models-names-splash-48k-1.17.syx` (H3d; ui/boot-splash + machines/plaits-48k).
+  Knobs read back: TUNE 0x4460 (effective note 64.4 for the C4 trig, two semitones under the cliff so that the
+  knob's tolerance cannot cross it; a first run at TUNE 0x4600 landed above the cliff and measured only +41,280 per
+  track, out/runs/task9b/cpu-first), MODEL 6, HARMONICS 0 (0x100 on the second track, the same chord), TIMBRE
+  0x7f00, MORPH 0x3c00.
+
+| configuration | DSP type cache | busy instructions / block | cycles / block, low / nominal / high | load %, low / nominal / high |
+|---|---|---:|---|---|
+| plaits-7models-names-splash-48k, 1 track CHORD, worst knobs | `0x0000000b` | 267,786 | 284,494 / 317,308 / 402,576 | 42.7 / 47.6 / **60.4** |
+| plaits-7models-names-splash-48k, 2 tracks CHORD, worst knobs | `0x000b000b` | 322,507 | 340,628 / 380,352 / 472,821 | 51.1 / 57.1 / **70.9** |
+
+- Per track: +57,896 instructions (1 track; 54,900 on the core at note 64 plus the hook) and 65,900 / 79,191 /
+  107,457 cycles (1.86 per instruction at the high bound); from the 2-track run +56,308 (1.58). Task 9's figures
+  (60.2 % and 70.5 %, TIMBRE 0) were 0.2 to 0.4 points low. **Safety rule:** one track at 60.4 % is far under 85 %;
+  CHORD stays enabled, and the track rule (1 track, set by ADDITIVE) is unchanged.
+- **Engines run on between notes** (modules/machines/plaits/src/dsp/plaits.c `note_on`, Task 9b): a note-on that does
+  not change the model now skips the engine's init, so it costs a few instructions less in that block; no block costs
+  more. The emulated runs above include it.
+
+## PLAITS SPEECH (model 7): worst block and measured DSP load (Task 10, 2026-10-19) **[D]**
+
+One agent. The worst block is searched first on the concrete core (tests/support/plaits_rig.py; scratch
+out/runs/task10/scan.py, fine.py), then measured in the emulator with the method of the sections above (paired 500 /
+2,500 ms windows, `SHARC_CYCMIX`, `sharc_cpi.cost_profile` against `sharcdb build --blocks
+56,69,76,78,80,88,91,93,103,104,107` of the image; block 104, the PLAITS object, is now 240,496 bytes).
+
+- **Search (concrete core, mode 1).** All of HARMONICS 0, 0x400, 0xa00, 0x1000, 0x1400, 0x1540, 0x1580, 0x1a00,
+  0x2000, 0x2600, 0x2a00, 0x2a80, 0x2b00, 0x3000, 0x4000, 0x5000, 0x6000, 0x7f00 (every region and both sides of each
+  crossfade edge) x TIMBRE 0, 0x2000, 0x4000, 0x6000, 0x7f00 x pitch (note 60, 96, 60 + TUNE 0x7c00, 127 + TUNE
+  0x7f00), 3 blocks each with a note-on in the first (360 settings). Cost by region: the naive formant synth crossfaded
+  with SAM (HARMONICS below 0x1540) **32,092 instructions** at the top pitch, nearly flat in TIMBRE and MORPH; the LPC
+  vowels with SAM 29,890 (31,937 with the controller back in scan mode after the consonant); the word banks 19,900 to
+  20,120 (scan mode included). The block of a note-on that changes the model to SPEECH adds speech_init:
+  **34,083** (mode 1) and **57,620** (mode 0, with the half-band). The init no longer decodes a word bank: the banks
+  are decoded tables (modules/machines/plaits/src/dsp/lib/lpc_speech_synth.c), where upstream decodes up to 926 frames
+  in the block of a bank change. Bounds in tests/patchkit/test_plaits_module.py: 39,500 / 66,500.
+- **Emulator.** Image `out/patch/plaits-8models-names-splash-48k-1.17.syx` (H3e). Knobs read back: TUNE 0x7c00 (the
+  panel's maximum, effective note 120 for the C4 trig), MODEL 7, HARMONICS 0x400 (0x500 on the second track, the same
+  region), TIMBRE 0x7f00, MORPH 0x4000.
+
+| configuration | DSP type cache | busy instructions / block | cycles / block, low / nominal / high | load %, low / nominal / high |
+|---|---|---:|---|---|
+| plaits-8models-names-splash-48k, 1 track SPEECH, worst knobs | `0x0000000b` | 244,687 | 259,182 / 289,102 / 361,764 | 38.9 / 43.4 / **54.3** |
+| plaits-8models-names-splash-48k, 2 tracks SPEECH, worst knobs | `0x000b000b` | 276,302 | 292,048 / 328,018 / 406,770 | 43.8 / 49.2 / **61.0** |
+
+- Per track: +34,796 instructions (1 track; 32,000 on the core plus the hook) and 40,589 / 50,984 / 66,645 cycles (1.92
+  per instruction at the high bound); from the 2-track run +33,206 (1.68). **Safety rule:** one track at 54.3 % is
+  under 85 %; SPEECH is enabled. It is the lightest model after ASYM-TRI; the track rule (1 track, set by two ADDITIVE
+  tracks at 86.6 %) is unchanged.
+- **Memory.** dsp.l2 use 245,020 of 922,756 bytes (H3d about 198,300): SPEECH's tables 26,308 bytes (word frames
+  20,096, boundaries 388, LPC code tables 1,032, vowel and consonant frames 720, naive phonemes 1,000, SAM phonemes
+  432, excitation pulse 2,560, bank indices 80), its code, and the per-voice union at 372 bytes (SPEECH; +28 per
+  voice). The boot stream (section 7) is 562,012 bytes (limit 0xfffff: 486,563 left; H3d 515,284).
+
+## PLAITS RINGS (model 12) and TERRAIN (model 21): worst block and measured DSP load (Task 10b, 2026-10-19) **[D]**
+
+One agent. Method as the SPEECH section: core scan (tests/support/plaits_rig.py; scratch out/runs/task10b/scan.py,
+probe.py), then the emulator (paired 500 / 2,500 ms windows, `SHARC_CYCMIX`, `sharc_cpi.cost_profile` against
+`sharcdb build --blocks 56,69,76,78,80,88,91,93,103,104,107` of the image; block 104, the PLAITS object, is 275,808
+bytes). Both engines run after Plaits' output stage (gains, limiter, clip), which the image adds for every model.
+
+- **Core (mode 1 / mode 0).** RINGS is nearly flat in its knobs: 121,700..122,500 instructions per block steady, the
+  block of a note-on that changes the model from VA 124,173 / 147,710 (the 24-mode resonator's init). TERRAIN: 57,700
+  ..70,264 steady (worst HARMONICS 0x0a00, the crossfade of terrains 0 and 1, TIMBRE 0x7f00), 71,204 / 94,741 in the
+  model-change block. Bounds in tests/patchkit/test_plaits_module.py: 143,000 / 170,000 and 82,000 / 109,000.
+- **Emulator.** Image `out/patch/plaits-10models-names-splash-48k-1.17.syx` (H3f). A first RINGS run at MORPH 0x4000
+  measured only +3,595 per track: the window was past the stock voice's life (the wrapper renders while the voice record's
+  ACTIVE byte is set, plaits.c), so RINGS is measured with MORPH 0x7f00, the other knobs at their defaults. Why MORPH
+  changes the stock voice's ACTIVE is **not established** (the wrapper reads only ACTIVE); pk_plaits_cpu now fails a run
+  whose busy count is within 20,000 of the stock baseline (209,891).
+
+| configuration | DSP type cache | busy instructions / block | cycles / block, low / nominal / high | load %, low / nominal / high |
+|---|---|---:|---|---|
+| plaits-10models-names-splash-48k, 1 track RINGS, MORPH 0x7f00 (knobs read back: TUNE 0x4000, MODEL 0xc00, HARMONICS 0x4000, TIMBRE 0x4000, MORPH 0x7f00) | `0x0000000b` | 334,313 | 348,760 / 417,319 / 487,137 | 52.3 / 62.6 / **73.1** |
+| plaits-10models-names-splash-48k, 1 track TERRAIN, worst knobs (read back: HARMONICS 0xb00, TIMBRE 0x7f00, MORPH 0x4000) | `0x0000000b` | 282,859 | 299,582 / 333,503 / 433,364 | 44.9 / 50.0 / **65.0** |
+
+- Per track over the stock baseline: RINGS +124,422 instructions, +192,017 cycles at the high bound (1.54 per
+  instruction); TERRAIN +72,968, +138,244 (1.89). Two-track runs were not made; adding one more track's increment
+  gives about 102 % (RINGS) and 86 % (TERRAIN) at the high bound (an extrapolation, not a measurement).
+- **Safety rule:** one track of each is under 85 %; both are enabled. RINGS is now the heaviest single-track model.
+  The track rule stays at 1 track.
+- **TERRAIN after jumps.** The figures above are steady blocks at the worst knobs. After parameter jumps TERRAIN's path
+  leaves the unit square, where upstream reads outside its tables (undefined behaviour) and the port takes its guarded
+  path (engines/terrain.c, fix round 1): the slow compiled jump test (120 jumps between a high bright path and the
+  wavetable terrains) peaks at 71,415 / 94,952 instructions (mode 1 / 0), the block of the model change included, i.e.
+  at most +1,151 over the steady worst (about +0.3 % of the block at the high bound, from the measured 1.89 cycles per
+  instruction; not measured in the emulator).
+- **Memory.** Section 7 is 578,540 bytes (limit 0xfffff: 470,035 left; H3e 562,012), image H3f after fix round 1
+  (`a16f9ae2…`). New table: lut_stiffness 260 bytes. The per-voice union stays at 372
+  bytes (RINGS 304, TERRAIN 24); PlaitsVoice grows to 916 bytes (the two limiter peaks and the accent).
+
+## PLAITS KICK, SNARE and HIHAT (models 13 to 15, 2026-10-19) **[D]**
+
+Task 12 of the all-engines plan: BassDrumEngine, SnareDrumEngine and HiHatEngine with their drums, as H3g
+(`out/patch/plaits-13models-names-splash-48k-1.17.syx`, sha256 `6d5644cb761b2faed173d3d711622748aad889ce04500156d3b08645cdab7aa2`,
+sources at 07f4466; models 0 to 7, 12 to 15 and 21, the encoding gate on). All three are strike engines on the note-on's
+RISING_EDGE with the velocity as the accent, as RINGS; the sustain branches (trigger UNPATCHED) are not ported.
+
+- **Tool check.** `pk_plaits_cpu` on RINGS (model 12, MORPH 0x7f00, windows 100,500, a quick tier) gives busy 335,881
+  instructions per block (finding: 334,313) and 52.4 / 60.7 / **70.6 %** (low / nominal / high; finding, windows
+  500,2500: 52.3 / 62.6 / 73.1 %): the figures agree to within 2.5 points at the high bound, the shorter window
+  being the difference. The drums below use the same windows. The first runs of every strike engine, at MORPH 0x4000 or at
+  the machine's default knobs, measured only the stock baseline (213,620 busy, 45.9 %): the window was past the stock voice's ACTIVE (cause of the dependence on MORPH not established, see the RINGS row
+  above), so every drum is measured with MORPH 0x7f00. A fuzz-based CPU method is planned.
+- **Core instructions (mode 1 / mode 0).** The drums are nearly flat in their knobs. The extreme grid (HARMONICS x TIMBRE x
+  MORPH x note 0 and 127 x TUNE 0, 0x4000, 0x7f00, three blocks each, the voice running on) peaks at KICK 67,683 / 91,220,
+  SNARE 73,269 / 96,806, HIHAT 71,381 / 94,918; the equivalence settings at 67,747, 73,653 and 69,262 (mode 1). Bounds in
+  tests/patchkit/test_plaits_module.py: 78,000 / 105,000, 84,500 / 111,500, 82,000 / 109,000. The compiled output equals
+  the host build within 1.8e-5 (tolerance 2e-3), 4 settings x 2 modes x 3 models.
+- **Emulator.** Image H3g, one track, MORPH 0x7f00 (KICK and SNARE: TUNE 0x400, HARMONICS 0, TIMBRE 0; HIHAT: TUNE 0x7c00,
+  HARMONICS 0x7f00, TIMBRE 0), the command of PORTING.md section 3 with `--windows 100,500`:
+
+| configuration | busy instructions / block | cycles / block, low / nominal / high | load %, low / nominal / high |
+|---|---:|---|---|
+| 1 track KICK (13) | 279,861 | 295,803 / 332,145 / 415,436 | 44.4 / 49.8 / **62.3** |
+| 1 track SNARE (14) | 284,234 | 300,811 / 339,912 / 422,139 | 45.1 / 51.0 / **63.3** |
+| 1 track HIHAT (15) | 284,054 | 302,994 / 340,219 / 430,349 | 45.4 / 51.0 / **64.6** |
+
+- Per track over the stock baseline (209,891 busy; 295,120 cycles at the high bound, from the RINGS row): KICK +69,970
+  instructions, +120,316 cycles; SNARE +74,343, +127,019; HIHAT +74,163, +135,229 (1.72, 1.71 and 1.82 per instruction).
+  Two tracks, extrapolated, not measured: about 80 % (KICK), 82 % (SNARE) and 85 % (HIHAT) at the high bound as read, and
+  about 83 / 85 / 87 % if the quick windows under-read by the 2.5 points they did on RINGS.
+- **Safety rule:** one track of each is under 85 %; all three are enabled. RINGS (73.1 %) stays the heaviest model, so the
+  track rule stays at 1 track.
+- **Memory.** Section 7 is 608,308 bytes (limit 0xfffff: 440,267 left; H3f 578,540). The per-voice union stays at 372 bytes
+  (HIHAT 324, SNARE 212, KICK 152); PlaitsVoice stays at 916 bytes. HiHatEngine's two noise sources are held once each
+  (SquareNoise's six phases and RingModNoise's six oscillators), and HatOscillator is padded to 8 words: selcc multiplies an
+  index by the 7 words of the unpadded struct with an integer multiply the encoding gate refuses (drift 1).
+- **Differences from upstream.** The sqrt of the SNARE's two level constants is Newton's iteration (`pl_sqrt`) instead of
+  the hardware vsqrt (the port has no square root); the oracle's build of the snare calls the same function, patched in
+  through a fail-closed copy of synthetic_snare_drum.h (tests/support/plaits_oracle.py), so the host tests are bit exact.
+  Random's state is one per engine (0x21 at init), drawn in upstream's order by the two sub-drums.
+
+## PLAITS NOISE (model 9, 2026-10-19) **[D]**
+
+Task 11a of the all-engines plan: NoiseEngine and ClockedNoise, as H3h (`out/patch/plaits-14models-names-splash-48k-1.17.syx`,
+sha256 `c1ce25156f128531b43db4b668c7e6b987edd3d2a6614e15e1810ce105b7deb4`, sources at 696fbfa; models 0 to 7, 9, 12 to 15 and 21,
+the encoding gate on, checksums ok, bootcheck 0 errors, 0 gate violations, sections 2, 4, 5 and 8 byte-equal to stock). NOISE
+runs on between notes (not a strike engine); a note-on's RISING_EDGE syncs its two clocks as upstream's `sync`.
+
+- **Random.** stmlib's global generator is one state per engine (0x21 at init, as the oracle seeds it when it selects the
+  engine); clocked noise 0 draws its whole 16-sample block first, then noise 1, as upstream, so one voice reproduces upstream's
+  sequence and the host tests are bit exact (12 tests; the 47,872.34 mutation fails 7 of them).
+- **Difference from upstream.** The per-sample gain `1 / Sqrt((0.5 + q) * 40 * f0)` is a division-free Newton reciprocal square
+  root (`pl_rsqrt`: bit-pattern start, three steps; 2.18 ulp worst from the true value over 1.5 million log-uniform points of 2^-40 to 2^40, about 2.6e-7 relative on the gain), because the DSP has no
+  square root; the oracle's copy of noise_engine.cc is patched to call the same function (tests/support/plaits_oracle.py
+  `rsqrt_noise_engine`, fail-closed). The TRIGGER_UNPATCHED lowest clock note is not ported (the wrapper never sets it).
+- **CPU fuzz (isolated compiled routine).** `pk_plaits_cpu --fuzz --model 9 --budget-seconds 180 --jobs 3`: 872 blocks in 33
+  sequences, worst 64,832 instructions (mode 1; note 6, HARMONICS 0x7f00, TIMBRE 0x7f00, MORPH 0x173c, a note-on block); a second
+  run under load (306 blocks) found 63,391. Bounds in tests/patchkit/test_plaits_module.py: 74,500 / 101,500.
+- **Emulator confirm.** One track, knobs TUNE 0xa00, HARMONICS 0x7f00, TIMBRE 0x7f00, MORPH 0x7f00 (the fuzz's knobs with MORPH at the
+  value the earlier strike-engine runs needed: with 0x173c the cycle model read a window past the stock voice's ACTIVE and gave negative
+  cycles; its instruction count, 277,436 busy, agrees), `--windows 100,500`:
+
+| configuration | busy instructions / block | cycles / block, high | load %, low / nominal / high |
+|---|---:|---:|---|
+| 1 track NOISE (9) | 276,595 | 487,436 | 53.4 / 59.6 / **73.1** |
+
+- Over the stock baseline (209,891 busy; 295,120 cycles at the high bound): +66,704 instructions, +192,316 cycles (2.9 per
+  instruction: the filters' reciprocals). Two tracks, extrapolated, not measured: about 102 % at the high bound, so the
+  track rule stays at **1 track**. On the same windows (100,500) RINGS measured 70.6 % (73.1 % was its 500,2500 figure), so NOISE is the heaviest enabled model; at the long windows it could read about 75 to 76 % (not measured), still under 85 %.
+- **Safety rule:** 73.1 % is under 85 %; NOISE is enabled.
+- **Memory.** Section 7 is 615,292 bytes (limit 0xfffff; H3g 608,308). The engine state is 112 bytes in the 372-byte union.
+- **Emulator proof, part i, model 9 only** (`PLAITS_PROOF_MODELS=9`): 10 checks pass (MODEL knob and TX word, type 11 at the DSP,
+  sounds at note 60, spectrum differs from VA's, HARMONICS, TIMBRE and MORPH move their slots and change the spectrum), 1,124 s.
+- **Review fixes (fix round 1).** The generator is seeded per track, `0x21 + track * 0x9e3779b1` (`noise_seed`, track 0 = 0x21 as the
+  oracle, so the single-voice proofs and the recorded digests are unchanged; the voice record gained a `track` int, 920 bytes); the
+  image was rebuilt (sha above, sources after the fix). `pk_plaits_cpu` now fails on a cycle model that is negative or outside
+  1 to 6 cycles per busy instruction (`cycle_model_invalid`, exit 1; at MORPH 0x173c the 100 ms run's cycle total was larger than
+  the 500 ms run's; cause **[O]**, probably the panel steps settling differently); `WORST[9]` uses MORPH 0x7f00. The fuzz result is
+  written under a run id and never overwritten (the first run's 64,832 file was lost; the figure stands as recorded; its sequence is not recoverable, and `--sequences K` is the reproducible search). `patchkit patch` refuses stale committed
+  objects.
+
+## PLAITS PHASE-DIST (model 17, 2026-10-20) **[D]**
+
+Task 13a of the all-engines plan: PhaseDistortionEngine (two VariableShapeOscillator instances, `<sync, output_phase>` = `<true, true>` for OUT and `<false, true>` for AUX, 2x rate then a naive 0.5x downsample), as H3i
+(`out/patch/plaits-15models-names-splash-48k-1.17.syx`, sha256 `eb38ae989ec6a67ed728e26b39fb9fae96b80d78603db50d64fb91a4b215ffda`, sources at ffffe4f; models 0 to 7, 9, 12 to 15, 17 and 21,
+the encoding gate on, checksums ok, bootcheck 0 errors, 0 gate violations, sections 2, 4, 5 and 8 byte-equal to stock). It runs on
+between notes and reads neither trigger nor accent.
+
+- **Host tests.** 10 tests, bit exact against upstream on OUT and AUX (knob corners, sweeps, parameter jumps, extreme notes, 16 and 12
+  sample blocks); the 47,872.34 mutation in the pitch path fails 6 of 10. No sqrt. The Sine phase recorder (table 28) never saw a
+  negative phase over corners, a grid and 40 jump seeds (smallest 0.25), but that is observed, not proved: a negative phase
+  (undefined behaviour upstream, a read before lut_sine) is wrapped by its integer part plus one (`phase_dist_sine`, a no-op wherever
+  upstream is defined; tested directly), the only deviation. The emulator figures below were measured before this guard (+24 static instructions, about 0.2 % of the block).
+- **CPU fuzz (isolated compiled routine).** `pk_plaits_cpu --fuzz --model 17 --budget-seconds 240 --jobs 3`: 833 blocks in 35
+  sequences, worst 100,952 instructions (mode 1; note 85, HARMONICS 0x7f00, TIMBRE 0x3c00, MORPH 0xa00); a second run (758 blocks)
+  found the same worst. Bounds in tests/patchkit/test_plaits_module.py: 116,500 / 143,500; the compiled extreme grid passes them.
+- **Emulator confirm.** One track, knobs TUNE 0x7c00, HARMONICS 0x7f00, TIMBRE 0x3c00, MORPH 0xa00, `--windows 100,500`:
+
+| configuration | busy instructions / block | cycles / block, high | load %, low / nominal / high |
+|---|---:|---:|---|
+| 1 track PHASE-DIST (17) | 311,955 | 475,814 | 49.6 / 56.2 / **71.4** |
+
+- Over the stock baseline (209,891 busy; 295,120 cycles at the high bound): +102,064 instructions, +180,694 cycles. Two tracks,
+  extrapolated, not measured: about 98.5 % at the high bound, so the track rule stays at **1 track**.
+- **Safety rule:** 71.4 % is under 85 %; PHASE-DIST is enabled.
+- **Memory.** Section 7 is 622,492 bytes (limit 0xfffff). The engine state is 80 bytes in the 372-byte union (the temporary buffer is on the stack).
+- **Tooling note.** `--fuzz --confirm` with the default windows (0.5 s and 2.5 s) did not finish inside `--max-seconds 3600` for this
+  heavy engine; the confirm ran as `--knobs worst --windows 100,500`.
+- **Emulator proof, part i, model 17 only** (`PLAITS_PROOF_MODELS=17`): 11 checks pass (MODEL knob and TX word 0x1100, type 11 at the
+  DSP, sounds at note 60, 261.6247 Hz (-0.006 cent), spectrum differs from VA's, HARMONICS, TIMBRE and MORPH move their slots and change
+  the spectrum), 672 s. Two earlier runs failed at the MODEL knob (stopped at 0x1000, a harness limit, PORTING.md drift 20), fixed in
+  `set_model`.
+
+## PLAITS VCF-VA (model 16, 2026-10-20) **[D]**
+
+Task 13b of the all-engines plan: VirtualAnalogVCFEngine (a `VariableShapeOscillator<false, false>` and a sub oscillator through two
+Svf stages with `FREQUENCY_FAST` tangents and SoftClip), as H3j (`out/patch/plaits-16models-names-splash-48k-1.17.syx`, sha256
+`d93c8bbb53d97786c24e0ae9ecb79daf73502aad6986b6704980a76ce46fd2ef`, sources at 024cda0; models 0 to 7, 9, 12 to 17 and 21, the encoding gate on, checksums ok, bootcheck 0 errors, 0 gate violations,
+sections 2, 4, 5 and 8 byte-equal to stock). It runs on between notes and reads neither trigger nor accent.
+
+- **Host tests.** 10 tests, bit exact against upstream on OUT and AUX (knob corners, sweeps, parameter jumps, extreme notes, 16 and 12
+  sample blocks); the 47,872.34 mutation fails 6 of 10. No sqrt. The one table index, the cutoff's `lut_pitch_ratio_high` read (recorder
+  table 29), measured 104 to 224 of 256 (TIMBRE is clamped to [0, 1] by the wrapper), so no guard was added.
+- **SIMD-friendly layout (PORTING section 5).** The two filters are a struct of arrays with pairs (lane 0 stage 1, lane 1 stage 2), first in the
+  state; the block loop keeps the filter state in locals with no calls (the stock `Svf::Process` written out). Host digests and core digests unchanged by it.
+  `pk_dsp_waste --model 16` (fuzz worst block, 60,501 instructions): `vs_render` (the two oscillators) 25.5 % of cycles, `vcf_render` 17.8 %,
+  `next` (the interpolator) 14.6 %, `SoftLimit` 8.6 %, `plaits_post` 6.3 %. Mix: compute 43 %, move 21 %, stack transfer 21 %. Hot loops: the
+  oscillator loop 24.8 % of instructions (both oscillators, trip 17), the filter loop 17.7 %: neither is over 40 % of the block, no kernel
+  threshold. Cheap wins left: inline `next` (call_inline, about 2.6 %).
+- **CPU fuzz (isolated compiled routine).** `pk_plaits_cpu --fuzz --model 16 --seed 1`: 886 blocks in 42 sequences, worst 66,817 instructions
+  (mode 1; note 123, TUNE 0x4e88, HARMONICS 0, TIMBRE 0x624a, MORPH 0x7f00). Bounds in tests/patchkit/test_plaits_module.py: 77,000 / 104,000;
+  the compiled tests of model 16 pass them.
+- **Emulator confirm.** One track, knobs TUNE 0x7c00, HARMONICS 0, TIMBRE 0x624a, MORPH 0x7f00, `--windows 50,250`:
+
+| configuration | busy instructions / block | cycles / block, high | load %, low / nominal / high |
+|---|---:|---:|---|
+| 1 track VCF-VA (16) | 270,592 | 402,916 | 43.1 / 48.3 / **60.4** |
+
+- Over the stock baseline (209,891 busy; 295,120 cycles): +60,701 instructions, +107,796 cycles. Two tracks, extrapolated, not measured:
+  about 76.6 % at the high bound; the track rule stays at **1 track** (RINGS sets it).
+- **Safety rule:** 60.4 % is under 85 %; VCF-VA is enabled.
+- **Memory.** Section 7 is 630,932 bytes (limit 0xfffff). The engine state is 116 bytes in the 372-byte union.
+- **Tooling notes.** `--fuzz --confirm` and the `--windows 100,500` confirm both ran past `--max-seconds 3600` while another lane's emulator
+  confirm ran (a 60 % engine!); `--windows 50,250 --max-seconds 5400` finished. `sharcdb build` of a patched image needs
+  `--blocks 56,69,76,78,80,88,91,93,103,104,107` (no known list).
+- **Emulator proof, part i, model 16 only** (`PLAITS_PROOF_MODELS=16`): 11 checks pass (MODEL knob and TX word 0x1000, type 11, sounds at note 60,
+  261.6257 Hz (+0.001 cent), spectrum differs from VA's, HARMONICS, TIMBRE and MORPH move their slots and change the spectrum), 677 s.
+
+## PLAITS SQUARE (model 23, 2026-10-21) **[D]**
+
+Task 13c of the all-engines plan: ChiptuneEngine, clocked only (owner decision: every DT2 note-on is `TRIGGER_RISING_EDGE` and steps the
+arpeggiator one note; no Plaits envelope, no unclocked chord mode, `already_enveloped` ignored), as H3k
+(`out/patch/plaits-17models-names-splash-48k-1.17.syx`, sha256 `f49cc711086d2e6847ee2c07a30d4c601e8b915410d5659a5a7f7860fa095650`, sources at c5b4198; models 0 to 7, 9, 12 to 17, 21 and 23, the
+encoding gate on, checksums ok, bootcheck 0 errors, 0 gate violations, sections 2, 4, 5 and 8 byte-equal to stock).
+
+- **Host tests.** 17 tests in tests/plaits/test_square_host.py, bit exact against upstream on OUT (the arpeggiated square) and AUX (the NES triangle
+  bass): all 11 chords x 12 patterns (up, down, up-down, random; ranges 1, 2, 4) at 16 and 12 sample blocks, knob corners, note-ons in every
+  sub-block and sparse, chord and pattern changes mid-arpeggio (12 seeds), sweeps, extreme notes; the arpeggio steps through the sorted chord notes
+  (zero-crossing check); only the rising edge is read. Arpeggiator note and octave (0..3) and the NES step (0..31) recorded in range. The 47,872.34
+  mutation fails 12 of 17.
+- **Gate.** First image refused: three bare `if (float)` tests compile to `2a_short:18ca000` (PORTING drift 22); written `!= 0.0f`.
+- **Digests** (tests/plaits/vectors/model23_h3k.json): host equals upstream continuously, core pinned; the compiled tests of model 23 (equivalence, run-on,
+  switch, slow extreme grid, bounds 27,300 / 54,300) pass.
+- **SIMD-friendly layout and the hot loop (PORTING section 5).** `pk_dsp_waste --model 23` (fuzz worst block, 22,897 instructions after the one
+  cheap win below): `nes_render` 27.0 % of cycles, `ss_render` 17.7 %, `plaits_post` 17.6 %, `render_engine` 10.6 %, `plaits_dc_block` 3.5 %. Hot loops: the NES
+  triangle 26.9 % of instructions, the square voice 17.4 %, `plaits_post` 9.9 % (trip 17). Mix: compute 33 %, stack transfer 31 %, move 22 %, branch 7 %.
+  The two oscillators together hold about 44 % of the instructions but are two different branchy algorithms (sync resets, band-limited steps, data-dependent
+  `if`s); no lane pairs, so no SIMD kernel is proposed, and neither alone is over 40 %. At 52 % of the DSP block with the stock voice the payoff is
+  small. Win taken: the per-sample `itof_nonneg` call became a 32-entry table (output unchanged). Left: inlining the blep helpers (call_inline, about 1 %).
+- **CPU fuzz.** `pk_plaits_cpu --fuzz --model 23 --seed 1`: 3,429 blocks in 147 sequences, worst 23,689 instructions (note 127, TUNE 0x7c00, HARMONICS 0x3a06,
+  TIMBRE 0x3c00, MORPH 0x7f00); measured before the table win (22,897 after).
+- **Emulator confirm.** One track, those knobs, `--windows 50,250`:
+
+| configuration | busy instructions / block | cycles / block, high | load %, low / nominal / high |
+|---|---:|---:|---|
+| 1 track SQUARE (23) | 234,028 | 348,354 | 37.3 / 41.6 / **52.3** |
+
+- Over the stock baseline (295,120 cycles): +53,234 cycles. Two tracks, extrapolated, not measured: about 60.2 % at the high bound; the track rule stays at **1 track** (RINGS sets it).
+- **Safety rule:** 52.3 % is under 85 %; SQUARE is enabled.
+- **Memory.** Section 7 is 640,436 bytes (limit 0xfffff). The engine state is 124 bytes in the 372-byte union.
+- **Tooling.** `pk_plaits_cpu`'s MODEL walk used 160 ms single detents: for model 16 and up it outlasted every `--max-seconds` (four runs, 2 h, no figure). It now uses the proof's walk
+  (bursts while far; unit-tested for every model in tests/patchkit/test_plaits_proof_set_model.py).
+- **Emulator proof, parts a and i, model 23 only** (`PLAITS_PROOF_MODELS=23`): 5 and 11 checks pass (MODEL knob and TX word 0x1700, type 11, sounds at note 60 within 1 cent
+  with HARMONICS 0 and TIMBRE 0, spectrum differs from VA's, knobs move their slots and change the spectrum), 679 s.
+
+## PLAITS STRING MACHINE (model 22, 2026-10-21) **[D]**
+
+STRING MACHINE (image H3l, `out/patch/plaits-18models-names-splash-48k-1.17.syx`, sha256 `1ab2ef0b...`) is Plaits' StringMachineEngine: four divide-down voices
+(the CHORD voice, `lib/string_synth_oscillator.c`) on the chord bank, the 11-row registration table, a pair of low-pass filters and the Ensemble chorus with
+its 1024-float circular delay buffer per voice (`lib/ensemble.c`, upstream's mask and write-pointer semantics). Host tests (11) are bit exact against upstream on OUT and
+AUX; the 47,872 mutation fails 7 of 11. Compiled core: equivalence and the extreme grid for model 22 pass; digests recorded (host equals upstream continuously, core pinned).
+
+- **Hot loop (`pk_dsp_waste --model 22`, the fuzz worst block).** 72,064 instructions, about 91,800 cycles (lower bound); mix: compute 36.7 %, stack transfers 29.0 %, other moves 23.1 %.
+  By function: `string_synth_oscillator_render` 30.2 % of cycles (its sample loop 27.6 % of the instructions, trip 17: the four chord voices, shared with CHORD),
+  `ensemble_process` 19.0 % (loop 18.4 %), **`ensemble_init` 16.8 %** (the 1024-iteration hardware loop that clears the buffer: the worst block is the model-change block),
+  `string_machine_render` 6.4 %, `plaits_post` 5.7 %. No loop is over 40 %: **no kernel step is needed.** The oscillator is the largest piece; four independent voices could pair
+  for PEx/PEy later (the pair layout of the filters is in place). Waste detectors: address arithmetic (5,030 cycles estimated), `itof_nonneg` calls (4,374: the oscillator's segment conversions and the
+  ensemble's offsets), stack reloads (2,175).
+- **CPU fuzz.** `pk_plaits_cpu --fuzz --model 22 --seed 1 --jobs 3`: 1,293 blocks in 53 sequences, worst 72,064 instructions (note 59, TUNE 0x6bc5, HARMONICS 0x3ad2, TIMBRE 0, MORPH 0x7f00, on the note-on that selects the model).
+- **Emulator confirm.** One track, `--knobs TUNE=0x6a00,HARM=0x3ad2,TIMB=0x0,MORPH=0x7f00 --windows 50,250`:
+
+| configuration | busy instructions / block | cycles / block, high | load %, low / nominal / high |
+|---|---:|---:|---|
+| 1 track STRING MACHINE (22) | 272,965 | 402,138 | 43.4 / 48.1 / **60.3** |
+
+- Over the stock baseline (295,120 cycles): +107,018 cycles. Two tracks, extrapolated, not measured: about 76.4 % at the high bound; the track rule stays at **1 track** (RINGS sets it).
+- **Safety rule:** 60.3 % is under 85 %; STRING MACHINE is enabled.
+- **Memory.** Engine state 4,304 bytes (union was 372): `sizeof(PlaitsVoice)` 920 to 4,852 bytes, 16 voices 77,632 bytes (was 14,720; the module's `seg_l2` is 93,312 bytes, was 30,136). Section 7 is 724,028 bytes (after the merge with the O3 kernels; 722,452 before)
+  (limit 0xfffff = 1,048,575: 326,123 left; H3k 640,436). Free L2 922,756 bytes.
+- **Owner checks.** checksums ok; `sharc_bootcheck` 0 errors; `pk_encoding_gate` 0 violations; sections 2, 4, 5 and 8 byte-equal to stock.
+- **Emulator proof, part i, model 22 only** (`PLAITS_PROOF_MODELS=22`): 11 checks pass (MODEL knob and TX word 0x1600, type 11, sounds at note 60 within 1 cent of 0.998 x 261.63 Hz, +0.26 cent,
+  spectrum differs from VA's, three knobs move their slots and change the spectrum), 759 s. The proof's walk sets HARMONICS 0 for the pitch check.
+- **Deviations.** The FxEngine context sequence (Read, Write with scale 0.0f, Read) is written as plain sums: identical for finite input. NaiveSvf's damp (resonance 1.0) is dropped (bp * 1.0 is bp).
+  The ensemble's delay offset is 18..367 samples in every test (lines are 511): no out-of-range read.
+
+## PLAITS DUST (model 10, 2026-10-21) **[D]**
+
+DUST (image H3m, `out/patch/plaits-19models-names-splash-48k-1.17.syx`, sha256 `3146da3d...` (fix round 1; `22488084...` before)) is Plaits' ParticleEngine: six random impulse trains through band-pass filters (`engines/dust.c`),
+a low-pass and the Diffuser on the FxEngine (8192 x 16-bit delay memory, seven delay lines, one LFO). Host tests (11) are bit exact against upstream on OUT and AUX; the 47,872
+mutation fails 5 of 11 and two quantisation mutations (the 4096 scale, a truncation off by one) fail 5. The one deliberate difference is the particle's `0.5 / Sqrt(q f Sqrt(density))`
+(drift 18: `pl_rsqrt`, measured relative error 2.3e-7 against the exact formula; the oracle's text is patched the same way). Compiled core: equivalence, extreme grid and C stack for model 10 pass;
+digests recorded (host equals upstream continuously, core pinned).
+
+- **Memory (computed before the code).** The delay memory is 8192 uint16 = 16,384 bytes per voice (packed two samples to a 32-bit word: selcc's halfword accesses are not usable). Union 4,304 to 16,568 bytes,
+  `sizeof(PlaitsVoice)` 4,852 to 17,116, 16 voices 273,856 bytes (was 77,632). dsp.l2 use 612,892 of 922,756 bytes (was 407,036; 310,000 free, 34 %). The voices are zeros in the boot stream:
+  section 7 was 929,884 bytes with the voices as a C static (zeros in the stream), 656,244 after the fix round (below).
+- **Hot loop (`pk_dsp_waste --model 10`, the fuzz worst block).** 114,002 instructions, about 149,900 cycles (lower bound). The worst block is the model-change block: `dust_init` 25 % of the instructions (the
+  4,096-word clear: 7 instructions per word by pointer, 14 by index: 143k to 114k instructions), `dust_render` loops: the diffuser's sample loop 27 % (trip 17), the particle loop 16 %. No loop is over 40 %:
+  **no kernel step is needed** (the clear and the diffuser's seven delay lines are the candidates). Waste detectors: address arithmetic, `rng_float`/`itof_nonneg` calls (the particles draw one random number a sample).
+- **CPU fuzz.** `pk_plaits_cpu --fuzz --model 10 --seed 1 --jobs 3 --sequences 60`: 1,469 blocks, worst 114,002 instructions (note 105, TUNE 0x4000, HARMONICS 0x2299, TIMBRE 0x7f00, MORPH 0, the note-on that selects the model).
+- **Emulator confirm.** One track, `--knobs TUNE=0x6d00,HARM=0x2299,TIMB=0x7f00,MORPH=0x0 --windows 50,250`:
+
+| configuration | busy instructions / block | cycles / block, high | load %, low / nominal / high |
+|---|---:|---:|---|
+| 1 track DUST (10) | 295,520 | 421,311 | 46.7 / 51.3 / **63.2** |
+
+- Over the stock baseline (295,120 cycles): +126,191 cycles. Two tracks, extrapolated, not measured: about 82.1 % at the high bound; the track rule stays at **1 track** (RINGS sets it). The confirm measures the static knobs, not the model-change block.
+- **Safety rule:** 63.2 % is under 85 %; DUST is enabled.
+- **Tooling.** The proof/fuzz rig put the module code at 0xB92000 and a tail block at 0xBA8000: with DUST the code is 91,621 words and overlapped it (HIHAT jumped into garbage while DUST's own tests passed). `TAIL_BASE` is 0xBAC000 and the rig asserts the code fits (drift 24).
+- **Owner checks.** checksums ok; `sharc_bootcheck` 0 errors; `pk_encoding_gate` 0 violations; sections 2, 4, 5 and 8 byte-equal to stock.
+- **Emulator proof, part i, model 10 only** (`PLAITS_PROOF_MODELS=10`): 10 checks pass (MODEL knob and TX word 0xa00, type 11, sounds (rms 0.035), spectrum differs from VA's, three knobs move their slots and change the spectrum), 701 s. DUST has no pitch check.
+
+### DUST fix round 1 (2026-10-22) **[D]**
+
+- **Zero statics are loaded data.** selcc emits `static T a[N];` as loaded data, so the voice array's 273,856 zero bytes were in the boot stream. The whole `plaits_voices[16]` (every engine union, STRING MACHINE's ensemble buffer, DUST's delay memory) is now
+  `.PKBSS plaits_voice_mem., 273856` in plaits_entry.s. **Section 7: 929,884 -> 656,244 bytes** (limit 1,048,575: 392,331 left; H3l was 724,028). dsp.l2 use is unchanged by design (bss counts against the region): 613,108 of 922,756.
+- Reserved memory is not zero at load: `plaits_track` zeroes a voice's non-engine fields at its first block; the engines are initialised by note_on. The rig's `clear_voice` now poisons the voice (0x5A5A5A5A) and clears the first-use flag; the first-note, run-on, switch and
+  core digests of every enabled model (36 compiled-core digest runs) pass unchanged, so no engine relied on zero static memory.
+- `pk_build.check_zero_runs` refuses a loaded data section with a zero run over 4 KB (build-all passes: no other module has one). Drift 25.
+- Image `out/patch/plaits-19models-names-splash-48k-1.17.syx` sha256 `3146da3d555702e9e5c772945d6b809285e13658a3280300094ff3add4f1d2cc`: checksums ok, bootcheck 0 errors, gate 0 violations, sections 2/4/5/8 equal to stock. The emulator confirm (63.2 %) and proof part i (10 checks) were on the previous image; the voice storage changes no engine code, the digests and kernel tests were re-run (113 kernel/host/label tests pass).
+- Minors: the delay memory's saturation paths are counted (11,542 hits, both directions) and mutated (clamp values) in test_dust_host (5 of 11 fail each); `test_state_bytes` states the exact 16,568 and 273,856 bytes; the DUST comment in pk_plaits_cpu.py moved to its entry; `PLAITS_MODEL_DUST` is in model order.
+
+## PLAITS O5: cycle-model fix and calibration against the unit (2026-10-22) **[D]**
+
+Emulator only, harness runs with `SHARC_CYCMIX`, windows 100,500 ms, high bound. The cycmix data-cache rule was
+fixed (the line comes from the effective address, I plus the pre-modify, mapped to the physical byte address, 64-byte
+lines; before, byte-space L2 used 16-byte lines and every pre-modify access fell in I6's or I7's line). Same image
+(`plaits-16models-fast`, 48cefe81), old rule → new rule:
+
+| configuration | busy / block | high cycles / block | load % low / nominal / high |
+|---|---:|---|---|
+| stock 1.17, TRIG 1 on its sample (`pk_plaits_cpu --stock`) | 216,151 | 303,468 → 324,075 | 33.8 / 36.7 / 45.5 → 34.2 / 37.5 / **48.6** |
+| 1 KICK track, worst knobs | 235,554 | 358,052 → 374,753 | 37.6 / 42.6 / 53.7 → 38.0 / 43.2 / **56.2** |
+| 4 KICK + 2 RINGS (worst knobs; plays cleanly on the unit) | 360,973 | 583,465 (new) | 58.6 / 69.5 / **87.5** |
+| 4 KICK + 2 RINGS + 1 CHORD (choppy on the unit) | 419,989 | 675,132 (new) | 68.2 / 80.7 / **101.3** |
+
+- **Calibration:** with the new rule the mix that plays measures 87.5 % and the choppy one 101.3 %, so "choppy" on
+  the unit lies between 87.5 and 101.3 % projected (high bound). The 85 % budget is therefore conservative by at
+  least 2.5 points, and the high bound is not optimistic any more. The earlier "about 76 %" was the stock-mix
+  projection of busy instructions under the old rule, not the cycle model.
+- **The gap left** is in the tool's favour: its stock baseline is the default project with one sample trig, while
+  the owner's project (its FX, its other tracks' patterns, the knob settings the owner used) is not modelled and can
+  only add work; the tool also runs every track at its worst knobs. Neither was measured.
+- PLAITS 1-track, after O5 (image `plaits-19models-fast4`, 126c9716) against before (`plaits-17models-fast3`, same
+  C for these models), the base fuzz-worst knobs: VA 66.1 → 58.1 %, ADDITIVE 67.5 → 55.5 %, PHASE-DIST 71.4 → 58.4 %.
+
+## PLAITS SWARM (model 8, 2026-10-22) **[D]**
+
+SWARM (image H3n, `out/patch/plaits-20models-names-splash-48k-1.17.syx`, sha256 `bbc893b8...`) is Plaits' SwarmEngine: eight grains, each a polyBLEP sawtooth (OUT) and a magic-circle sine (AUX) at one
+random pitch under a random-length envelope (`engines/swarm.c`). Host tests (13) are bit exact against upstream on OUT and AUX with no deliberate difference in the arithmetic (knob corners at sub-blocks
+of 16 and 12, jumps, sweeps across the grain-size boundary, extreme notes); four mutations (the 0.97 size factor, a rank, the burst decay, 47,872 in the pitch path) each fail 5 of 10. Compiled core:
+equivalence (48k and 96k), model switch, run-on, C stack and the extreme grid for model 8 pass; digests recorded (host equals upstream continuously, core pinned).
+
+- **Trigger (owner decision, 2026-10-22).** Upstream's `burst_mode` is `!(trigger & TRIGGER_UNPATCHED)`. The DT2 convention (always a patched trigger) would make the swarm slow with every grain after a note-on and never speed up
+  again. By the owner's decision model 8 alone gets `TRIGGER_UNPATCHED` and nothing else on every block (plaits.c `TRIG_UNPATCHED`, a documented exception to the convention): the continuous mode, a fresh grain rate of 0.5 to 2.0 per grain, note-ons
+  start no bursts, the amp envelope shapes the note. Both modes are ported; the oracle is driven with the same trigger bits (patched and unpatched host tests are bit exact; the wrapper test shows model 8 ignores note-ons, model 9 does not).
+  Upstream's grain rate starts at 0 (Init): the first Step wraps the phase at once and the grains run from the first block.
+- **Layout (section 5).** The eight grains are lanes of 15 arrays of eight floats (envelope 7, saw 4, sine 4; 484 bytes with the generator), contiguous, so four PEx/PEy pairs hold the eight lanes. The rank `(i - n) / n` has
+  n = 3.0 (upstream's `(kNumSwarmVoices - 1) / 2` is an integer division): -1, -2/3, -1/3, 0, 1/3, 2/3, 1, 4/3, stored as bit patterns (drift 2). The union stays DUST's (16,568 bytes); `sizeof(PlaitsVoice)` and
+  the `.PKBSS` size are unchanged. Section 7 is 662,356 bytes (DUST's image 656,244; cap 1,048,575).
+- **Out-of-range reads.** The pitch table argument is 128 + 48 x expo x spread x rank: expo in [-1, 1), spread <= 1, rank <= 4/3, so 64 to 192 in a 256-entry table (recorded: 66..192 over the corners and 12 jumpy
+  sequences); the grain window's `Sine(0.5 x phase + 1.25)` takes 0.75 to 1.75 (wrapped). Nothing leaves a table; no deviation from upstream.
+- **Hot loop (`pk_dsp_waste --model 8`, the fuzz worst block).** about 44,600 to 46,200 instructions per block (about 58,200 cycles, lower bound; the burst-mode run: 78,514 at the high bound). `swarm_render` is 68 % of the cycles, `swarm_step` 4 %,
+  `rng_float`/`rng_word` 6 %. The per-grain sample loop (0xba492d-0xba4a17: saw with its blep branch and sine together, 16 samples) holds **about 50 % of the instructions (48 % in the burst-mode run: 38 % of the high-bound cycles)**; with the
+  per-grain envelope and pitch code the grain loop is about 69 %. Over the 40 % threshold: a kernel step is warranted (the loop is lane-parallel: eight independent grains, the saw's wrap is the only branch). Mix: compute 41 %,
+  stack transfers 29 % (invariant stack reloads: 21 loads of one slot per iteration, 2,200 cycles), address arithmetic 3 %. Waste detectors: invariant stack reload, address arithmetic, `call_inline` of `ThisBlepSample`, `swarm_step`, `rng_float`.
+- **CPU fuzz (continuous mode).** `pk_plaits_cpu --fuzz --model 8 --seed 1 --budget-seconds 240 --jobs 3`: 1,993 blocks, worst 46,189 instructions (note 127, HARMONICS 0, TIMBRE 0x2b55, MORPH 0x4d3f; the burst-mode fuzz gave 46,274): the cost is nearly flat in the knobs.
+- **Emulator confirm.** One track, `--knobs TUNE=0x7c00,HARM=0x0,TIMB=0x2b55,MORPH=0x4d3f --windows 100,500`:
+
+| configuration | busy instructions / block | cycles / block, high | load %, low / nominal / high |
+|---|---:|---:|---|
+| 1 track SWARM (8), continuous | 253,480 | 362,408 | 40.0 / 44.2 / **54.4** |
+
+- Over the stock baseline (295,120 cycles): +67,288 cycles. Two tracks, extrapolated, not measured: about 65 % at the high bound; the track rule stays at **1 track** (RINGS sets it).
+- **Safety rule:** 54.4 % is under 85 %; SWARM is enabled.
+- **Owner checks.** checksums ok; `sharc_bootcheck` 0 errors; `pk_encoding_gate` 0 violations; sections 2, 4, 5 and 8 byte-equal to stock; section 7 is 662,636 bytes.
+- **Emulator proof, part i, model 8 only** (`PLAITS_PROOF_MODELS=8`, continuous mode): 11 checks pass (MODEL knob and TX word 0x800, type 11, sounds, note 60 within 1 cent with HARMONICS 0, spectrum differs from VA's, three knobs move
+  their slots and change the spectrum), 757 s.
+- **Not run (second round):** the 96k compiled equivalence and the other model-switch ids were run in the first round (burst mode) only.
+- **Not run:** the whole `test_plaits_module.py`, other models' slow digests and grids (no shared behaviour changed: `fast_2_sin` and `fast_rsqrt_carmack` moved verbatim into the header, TERRAIN's host test passes).
+  The base's two lint failures (`test_pk_zero_runs.py`, `plaits_rig.py`) are formatted in this lane.
+
+## PLAITS O6: kernels for twelve engines, the stock cost of a PLAITS track (2026-10-22) **[D]**
+
+Emulator and isolated core only (not silicon). Image H-opt7 `out/patch/plaits-21models-fast5-names-splash-48k-1.17.syx`
+(sha256 `25d5e892...`): checksums ok, bootcheck 0 errors, gate 0 violations, sections 2, 4, 5 and 8 equal to stock,
+section 7 706,556 bytes.
+
+- **The stock code does not grow with PLAITS tracks.** Per-PC profiles of the O5 runs (stock with one sample trig
+  against 4 KICK + 2 RINGS, windows 500 - 100 ms): stock code (0x1c0000.., 0xb80000..0xb88fff) runs 216k instructions
+  per block in both; the voice loop renders and post-processes all 32 voices whatever their type, and the stock sample
+  renderer of the trig track (0x1c5000 page, 5.1k) disappears. A PLAITS track costs its routine plus about 100
+  instructions of hook per voice.
+- **The render loop** (FUN_1c642a, 0x1c6ae8..0x1c6b09) calls the renderer (0x1c4ecf, or 0x1c5576 when the per-voice word
+  read at 0x1c6ae7 says so) for voices 0..31 in record order with nothing else between them; the trigger latch, the
+  frame and ACTIVE are set before it. So eight PLAITS tracks of one model run their routines back to back.
+- **The emulator treats never-written L2 as unknown per word**: a DUST build that skipped the delay-memory clear forked
+  (`native-trap ... fork`) at the first compare on a sample read from a half-written word, on 8 DUST tracks.
+- **8-track projection** (`pk_dsp_stalls` fuzz-worst block, high bound, cold caches; 48.6 % + 8 x cycles / 6,666.67; the
+  O5 mix 4 KICK + 2 RINGS projects to 87.9 % this way, measured 87.5 %), base c8dcc0a -> lane opt-o6 27bf26a:
+  DUST 280 -> 156 % (model-change block), FORMANT 201 -> 109 %, TERRAIN 167 -> 110 %, STRING MACHINE 165 -> 129 %, NOISE
+  162 -> 93 %, VCF-VA 155 -> 106 %, 2FM 151 -> 94 %, WAVETABLE 140 -> 108 %, SWARM 139 -> 120 %, ASYM-TRI 134 -> 95 %,
+  SPEECH 131 -> 113 %, VA 121 -> 110 %; unchanged engines: PHASE-DIST 116, CHORD 115, HIHAT 106, SNARE 105, RINGS 103,
+  ADDITIVE 100, KICK 100, SQUARE 92 %; STRING (11, merged during O6) 234 %. With seven of the eight voices on warm
+  caches the figures are 10-20 points lower (ASYM-TRI 79 %, NOISE 82 %, 2FM 84 %).
+- Details, the lazy-clear proof and the approaches that were not built: modules/machines/plaits/OPTIMIZING.md (O6
+  entries).
+## PLAITS STRING (model 11, 2026-10-22) **[D]**
+
+STRING (image H3o, `out/patch/plaits-21models-names-splash-48k-1.17.syx`, sha256 `dce0e3c1...`) is Plaits' StringEngine: three Karplus-Strong strings used in turn (`engines/string_engine.c`). A strike engine: every note-on is RISING_EDGE, velocity is the
+accent; the sustain (unpatched) branch is not ported. Host tests (18) are bit exact against upstream on OUT and AUX (knob corners with HARMONICS on both sides of the 0.24..0.26 dead band at sub-blocks of 16 and 12 and accents 0, 0.787, 1; fast repeats down to every sub-block; jumps; sweeps; extreme
+notes including the linear upsampler for low f0). Mutations (47,872 in the pitch path, the DC pole, the 0.408 stretch constant, the string advance) each fail 11 to 13 of 18. Compiled core: equivalence (48k and 96k), model switch, C stack, lib tables and the extreme grid for model 11 pass; digests recorded (host equals upstream continuously, core pinned).
+
+- **Memory.** Per voice: 3 x (1024 + 256) floats = 15,360 bytes of delay lines, state 15,700 bytes; the union stays DUST's (16,568 bytes), `sizeof(PlaitsVoice)` x 16 = 273,856 (unchanged). dsp.l2 632,092 of 922,756; section 7 is 675,228 bytes (cap 1,048,575; H3n 662,636).
+  `lut_svf_shift` (257 floats) joins the shared tables.
+- **Deviations / drift.** Division by the zero f0 history at an engine's first strike (drift 26, value-identical); an integer macro in a float constant refused by the gate (drift 27). Delay-line indices are masked as upstream's modulo; tuning at note 69 measures 440.9 Hz (3.5 cents sharp, upstream's own: the oracle is bit exact).
+- **Clear cost.** The first version cleared the 3 x 1,280 words with indexed stores: fuzz worst 106,610 instructions. Through a pointer (drift 24): 85,757.
+- **Hot loop (`pk_dsp_waste --model 11`, the fuzz worst block, a model-change block).** 79,303 instructions, 113,870 cycles (lower bound). `string_voice_init` 37.5 % of cycles (the clear loops 34 % of instructions), `string_process` 24.2 % (its per-sample loop 21 % of instructions), `dl_read_hermite` 6.7 %.
+  In a steady block (init removed, estimated) the per-sample string loop with the hermite read is about 49 % of the cycles (`string_process` alone about 39 %): at the 40 % threshold; a kernel step (the three strings as lanes of one loop) is a candidate. Waste detectors are small (about 1 % each).
+- **CPU fuzz.** `pk_plaits_cpu --fuzz --model 11 --seed 1 --sequences 53 --jobs 3`: 1,253 blocks, worst 85,757 instructions (note 59, HARMONICS 0x7f00, TIMBRE 0x382a, MORPH 0x2bce, the note-on that selects the model).
+- **Emulator confirm.** One track, `--knobs TUNE=0x3f00,HARM=0x7f00,TIMB=0x382a,MORPH=0x2bce --windows 100,500`:
+
+| configuration | busy instructions / block | cycles / block, high | load %, low / nominal / high |
+|---|---:|---:|---|
+| 1 track STRING (11) | 264,126 | 408,435 | 42.3 / 47.3 / **61.3** |
+
+- Over the stock baseline (295,120 cycles): +113,315 cycles. Two tracks, extrapolated, not measured: about 78 % at the high bound; the track rule stays at **1 track**.
+- **Safety rule:** 61.3 % is under 85 %; STRING is enabled.
+- **Owner checks.** checksums ok; `sharc_bootcheck` 0 errors; `pk_encoding_gate` 0 violations; sections 2, 4, 5 and 8 byte-equal to stock.
+- **Emulator proof, part i, model 11 only** (`PLAITS_PROOF_MODELS=11`): 5 checks pass (MODEL knob and TX word 0xb00, type 11, sounds, note 60 within 5 cents with HARMONICS 0x1f00: +3.99 cent, upstream's own offset, retriggers), 428 s. The 1-cent bound of the other models is 5 cents for STRING in the proof.
+- **Not run:** the whole `test_plaits_module.py`, other models' slow digests and grids (the shared tables gained one table at the end; `test_compiled_lib_tables_equal_host_bits` passes).
+
+## PLAITS DX7 (models 18, 19, 20 and 24, 2026-10-22) **[D]**
+
+Lane dx7, emulator and the concrete core only, nothing flashed, not second-checked. Design: docs/design/2026-10-22-plaits-dx7-design.md.
+
+- **Port.** `engines/six_op.c` is Plaits' `SixOpEngine` with `fm::Voice<6>`, `Operator`, `Envelope`, `Lfo`, `Algorithms<6>` and `dx_units.h` in C99. The 0..99 conversions of dx_units.h and the compiled algorithms
+  are generated tables (`lib/gen_dx_tables.py`, checked entry by entry against upstream through the oracle); the four banks are 16,384 bytes (`lib/dx7_banks.c`, from `resources.cc` and the owner's
+  `data/tyler-favorites.syx`, header, length and checksum checked at generation). The sustain mode and the LFO's Scrub are not ported (the wrapper never gives this engine TRIGGER_UNPATCHED).
+  Host: 17 tests bit-exact against upstream (all 128 patches with note-on, hold, note-off and retrigger; knob corners, random gates and jumps, extremes, sub-blocks of 16 and 12); 10 mutations (47,872 Hz
+  constants, a Pow2Fast coefficient, keyboard scaling, level headroom, envelope scale, feedback scale, gate, the staggered carry, the hysteresis sign) each fail at least one of them, nine of them 9 to 11. Compiled core against host: max error 4e-7.
+- **Note-off.** The release mask is TX 0x24 (hw 0x12): the ColdFire sends it in the frame after a TRIG key-up (the emulator saw 0x24 = 0x0001 one poll after the release). The DSP copies it to its frame (word
+  at 0x255900), FUN_1c24e9 turns it into per-track words (0x25232c + 4 t), and the voice loop calls FUN_1c6056(voice), which clears the voice's pending and latched trigger bytes and stores 1 in the byte
+  0x24f0ec + v (E + 0xde24 of the engine object); the trigger path stores 0 there. **The byte is a pulse of about one block (0.7 ms), not a level**: at 0.1 ms polls it was caught zero, while the shim saw it.
+  core/dsp-inline gained `_di_released(v)` (anchor `dsp.inline.release_latch` = the trigger latch's literal + 0x40; the port entry was added by hand to devices/ports/dt2-1.17.toml because `port_resolve`
+  needs the ColdFire database of 1.17, which this tree lacks), the shim copies it into `PlaitsFrame.released`, and the wrapper latches it per voice until the next note-on. DX7 models get RISING_EDGE | HIGH in a
+  note-on's first sub-block, HIGH until the latched note-off and LOW after: the documented exception (PORTING.md drift 29). Proof part m (`pk_proof_plaits --only m`, emulator): while TRIG 1 is held the DSP
+  frame word and the shim's word are 0; after the key-up the frame copy carries the mask and `_pl_frame + 36` reads 1 (both notes), and the held note sounds (rms 0.05). Wrapper tests against the oracle:
+  named and random gate sequences, and the pulse stream equals the level stream; compiled core against host within MAX_ERR.
+- **Patch names on HARMONICS: not built (infeasible within this task).** The formatter is `void fmt(int raw, char *buf)`. Its callers: `param_value_text` (0x400c8952: `(code, value)`) and `ParameterSet::vfunc_23`
+  (0x4003a89a): that one reads `this`, calls `this->vtable[9](this, code, raw)` and then tail-jumps to the row's formatter with the arguments rewritten to `(raw, buf)`, overwriting `this` on the stack. No
+  call passes the track. The selected track exists only as a heap field: a RAM diff over TRK + TRIG 1..3 found nothing in the CPU's static RAM (0x80000000-0x80060000) or in the singleton object at
+  0x44f370a0 (0x44fb9c40), and the one word that follows the track (0, 1, 2, 0), at 0x4505761c in this boot, is written at 0x4005f1cc (`move.l D0,(0x1a0,A2)` of a view object, from a virtual call whose result
+  has the track id at +8) and is referenced by no pointer in 0x42000000-0x43000000 or the static RAM. A formatter cannot depend on a heap address. What would work: a ColdFire hook that stores `this` of
+  vfunc_23 (and the equivalent in the header path) in a global, which needs new ColdFire anchors, which need `port_resolve` with the 1.17 Ghidra dump (not in this tree); the track's MODEL is then at
+  `Sound + 0x14 + 2 * 26` (raw mirror 0x80003362 + 0x8e t + 0x34). The patch index also needs a memoryless DSP quantiser, because upstream's hysteresis (0.005) makes the patch at the word 0x2300 (UI 35) depend on
+  the direction (PORTING.md drift 28). The hardware test lists the patch names by HARMONICS value instead.
+- **CPU.** `pk_plaits_cpu --fuzz --model 18 --seed 1 --jobs 3 --budget-seconds 420`: 67 sequences, 1,625 blocks, worst **96,314 instructions** (the steady block of patch 32: note 127, TUNE 0x4300, HARM 0x7f00,
+  TIMB 0x37e4, MORPH 0x7f00; the first-note block is 31,167 and the patch-setup blocks 54,140). Emulator confirm, one track, `--knobs TUNE=0x4300,HARM=0x7f00,TIMB=0x37e4,MORPH=0x7f00 --windows 50,250`:
+
+| configuration | busy instructions / block | cycles / block, high | load %, low / nominal / high |
+|---|---:|---:|---|
+| 1 track DX7-1 (18) | 265,385 | 420,776 | 43.0 / 48.5 / **63.1** |
+
+  Two tracks, extrapolated, not measured: about 82 % at the high bound (the stock baseline is 295,119 cycles). The track rule stays at 1 track. Safety rule: 63.1 % is under 85 %; DX7 is enabled.
+- **Hot loop (`pk_dsp_waste --model 18`, the fuzz worst block).** `render_ops` holds 53.5 % of the cycles and `SinePM` (called from it) 21.1 %: the per-sample loop 0xba6d1b-0xba6e14 is **45 % of the instructions**
+  (30.6 % in its inner operator loop, trip 2 to 3), 75 % of the cycles with SinePM. Over the 40 % threshold: a kernel step is warranted (the operators of a chain are sequential, the six operators of the
+  algorithm are lanes only across chains; the voice's per-sample state is phase, amplitude, increments). Instruction mix: compute 33 %, stack transfers 29 %, other moves 23 %. Detectors: address arithmetic
+  (19 sites), far folds, and `SinePM` not inlined (2.1 %).
+- **Memory.** SixOp state 2,740 bytes (the union stays DUST's 16,568); `PlaitsVoice` 17,120 bytes (a latched release flag was added), 16 voices 273,920 (`.PKBSS`); tables 16,384 (banks) + 3,944 (units,
+  algorithms); section 7 716,784 of 1,048,575 bytes.
+- **Quantiser.** **[C]** (2026-10-23) The patch index is now memoryless (hysteresis 0), the names are shown in the HARMONICS header: PORTING drift 28 and finding 02, "PLAITS DX7 patch names". The "not built" bullet above is superseded.
+
+## MODEL knob order (owner, 2026-10-22) **[D]**
+
+The knob runs 0 .. 20 as the engines, then 21 DX7-4, 22 TERRAIN, 23 STRING MACHINE, 24 SQUARE. The engine numbers do not change
+(digests, vectors and fuzz keys stay as recorded). `plaits_track` rewrites the frame's model word (knob position << 8) to the
+engine number before `plaits_render`: for 21 `+ 768`, for 22 .. 24 `- 256`, on the float word (an int/float conversion version
+failed the encoding gate: `018ca150`, shape `2a_short:18ca000`, which is not proven on hardware). The rig
+(`tools/patchkit/plaits_rig.py`, `knob_of_engine`) takes engine numbers and writes knob positions, so the fuzz and CPU tools
+stay keyed by engine. Names (`model_fmt.s`) and the randomizer list (`randomize.s`, positions 0 .. 24) are in knob order.
+A project saved with an earlier image reads MODEL 21 .. 24 as other models.

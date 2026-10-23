@@ -343,7 +343,7 @@ def patched_image(cell: Cell, syx: Path, dest: Path | None = None) -> Path:
     processes that run side by side, so none reads an image another is writing)."""
     if not cell.modules:
         return syx
-    out = (dest or ROOT / "out" / "patch") / f"pk-{cell.slug}.syx"
+    out = (dest or ROOT / "out" / "patch") / f"pk-{cell.slug}.ungated.syx"
     out.parent.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(
         [
@@ -355,6 +355,8 @@ def patched_image(cell: Cell, syx: Path, dest: Path | None = None) -> Path:
             str(syx),
             "--modules",
             ",".join(cell.modules),
+            # Emulator smoke images are never flashed; cells with DSP code (pluck) fail the gate.
+            "--no-encoding-gate",
             "-o",
             str(out),
         ],

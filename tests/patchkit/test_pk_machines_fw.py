@@ -19,7 +19,7 @@ from tools.patchkit import (  # noqa: E402
 
 SYX = config.stock("Digitakt_II_OS1.17.syx")
 SRC = ROOT / "modules" / "core" / "machines" / "src" / "cf" / "dt2" / "machines.s"
-ROWSIZE = 64
+ROWSIZE = 68
 FIRST = 7
 ROWS = 0x47EC0000
 STOCK_LIST = 0x47EC1000
@@ -95,6 +95,7 @@ def tables():
             + be32(e["own_dsp"])
             + be32(n)
             + be32(s)
+            + be32(e.get("one_page", 0))
         )
     assert len(rows) == ROWSIZE * COUNT
     mem[ROWS] = rows

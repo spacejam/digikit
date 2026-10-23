@@ -22,6 +22,7 @@ Both carry the symbol's short-word address; the addend is encoded in the symbol 
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import re
@@ -33,6 +34,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 from tools.patchkit import (  # noqa: E402
+    pk_crosscheck,  # noqa: E402
+    pk_cunion,  # noqa: E402
     pk_elf,  # noqa: E402
     pk_toolchains,  # noqa: E402
 )
@@ -112,7 +115,16 @@ def split_symbol(name: str) -> tuple[str, int]:
     return m.group(1), add
 
 
-def _object(obj: Path, source_sha: str, section: str | None) -> SharcObject:
+def _object(
+    obj: Path,
+    source_sha: str,
+    section: str | None,
+    preprocessed: str | None = None,
+    compiled_asm: str | None = None,
+) -> SharcObject:
+    """The object Selache wrote, cross-checked (tools/patchkit/pk_crosscheck.py). `preprocessed` is an assembly
+    source's preprocessor output (one statement per instruction is required); `compiled_asm` is selcc's assembly of a
+    C unit (used only to verify relocation addends)."""
     elf = pk_elf.parse(obj.read_bytes())
     if section is None:
         section = next(
@@ -132,6 +144,16 @@ def _object(obj: Path, source_sha: str, section: str | None) -> SharcObject:
     rows = sel.parse_listing(listing)
     if b"".join(r.raw for r in rows) != sec.data:
         raise PkSharcError("Selache listing bytes do not equal the section bytes")
+    stmts = pk_crosscheck.statements(preprocessed) if preprocessed is not None else None
+    try:
+        mismatches = pk_crosscheck.check(obj.read_bytes(), section, sec.data, stmts)
+    except pk_crosscheck.CrossCheckError as e:
+        raise PkSharcError(f"cross-check (tools/patchkit/pk_crosscheck.py): {e}") from e
+    if mismatches:
+        raise PkSharcError(
+            "Selache's listing and our decoder disagree on operands (tools/patchkit/pk_crosscheck.py):\n  "
+            + "\n  ".join(m.format() for m in mismatches)
+        )
     symbols = {
         s.name: (s.value, s.bind != "local")
         for s in elf.symbols
@@ -145,6 +167,26 @@ def _object(obj: Path, source_sha: str, section: str | None) -> SharcObject:
             raise PkSharcError("section-relative relocation not supported")
         name, add = split_symbol(r.symbol.name)
         relocs.append(SharcReloc(r.offset, r.rtype, name, add + r.addend))
+    # Selache drops the constant of `symbol + constant` in some forms: every reference must match its relocation.
+    names = {split_symbol(s.name)[0] for s in elf.symbols if s.name}
+    rel3 = [(r.parcel, r.symbol, r.addend) for r in relocs]
+    if stmts is not None:
+        parcels = [
+            i.external.parcel_address
+            for i in sel.compare_external_bytes(sec.data).instructions
+        ]
+        bad = pk_crosscheck.check_addends(stmts, parcels, rel3, names)
+    elif compiled_asm is not None:
+        bad = pk_crosscheck.check_addends_unmapped(
+            pk_crosscheck.statements(compiled_asm), rel3, names
+        )
+    else:
+        bad = []
+    if bad:
+        raise PkSharcError(
+            "relocation addends (docs/findings/20-patch-toolchains.md):\n  "
+            + "\n  ".join(bad)
+        )
     tc = {"selache_rev": sel.PINNED_REVISION}
     for n in ("selas", "seldump"):
         tc[n + "_sha256"] = hashlib.sha256(_tool(n).read_bytes()).hexdigest()
@@ -212,12 +254,25 @@ def _native_rows(
 
 # Selache encode bugs found against the firmware image (docs/findings/05-sharc-isa-and-decoding.md): the
 # re-decode below cannot see them when both decodes agree on a wrong immediate, so refuse the form.
+# The negative-shift hazard is fixed by tools/patchkit/selache_patches; it stays armed for an unpatched build.
 ENCODE_HAZARDS = [
     (
         re.compile(r"\blshift\b[^;]*\bby\s+-\s*\d", re.I),
         "LSHIFT ... BY -n clears the immediate's sign-extension nibble",
     ),
 ]
+_NEG_SHIFT_PROBE = ".SECTION/PM seg_pmco;\nR2 = LSHIFT R15 BY -1;\n"
+_NEG_SHIFT_WORD = "023e7800ff2f"
+
+
+@functools.cache
+def _negative_shift_patched(selas: str) -> bool:
+    """True when this selas encodes a negative shift immediate with the stock data_hi bits."""
+    try:
+        rows = assemble(_NEG_SHIFT_PROBE, _check_hazards=False).rows
+    except (PkSharcError, subprocess.CalledProcessError):
+        return False
+    return [raw for _, raw in rows] == [_NEG_SHIFT_WORD]
 
 
 # Selache ignores the (SW)/(SWSE) suffix of a direct load (it emits the normal-word form), so
@@ -236,7 +291,10 @@ def _sw_prepare(source: str) -> tuple[str, list[tuple[str, bool]]]:
     def sub(m: re.Match) -> str:
         label = f"_pk_sw{len(marks)}"
         marks.append((label, m.group(4).upper() == "SWSE"))
-        return f"{m.group(1)}.GLOBAL {label};\n{m.group(1)}{label}:\n{m.group(1)}R{m.group(2)} = DM({m.group(3)});"
+        # one line: the statements keep their source line numbers (pk_crosscheck reports them)
+        return (
+            f"{m.group(1)}.GLOBAL {label}; {label}: R{m.group(2)} = DM({m.group(3)});"
+        )
 
     return _SW_LOAD.sub(sub, source), marks
 
@@ -281,8 +339,62 @@ def _bss_prepare(source: str) -> tuple[str, list[tuple[str, int, bool]]]:
     return _PKBSS.sub(sub, source), found
 
 
-def assemble(source: str, section: str | None = None) -> SharcObject:
-    for pat, why in ENCODE_HAZARDS:
+_LABEL_DEF = re.compile(r"^\s*([A-Za-z_.][\w.]*)\s*:(?![:=])")
+_COND_IF = re.compile(r"^\s*#\s*(if|ifdef|ifndef)\b")
+_COND_ELSE = re.compile(r"^\s*#\s*(else|elif)\b")
+_COND_END = re.compile(r"^\s*#\s*endif\b")
+
+
+def duplicate_labels(source: str) -> list[tuple[str, int, int]]:
+    """Labels defined twice in one assembly translation unit: (name, first line, second line), 1-based. selas accepts a
+    redefined label silently and binds every reference to one definition, so a label shared by two concatenated
+    sources (pk_build.dsp_object) sends one file's jumps into the other. Two definitions in different branches of the
+    same #if/#else are exclusive and allowed. Comments are ignored."""
+    text = re.sub(
+        r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), source, flags=re.S
+    )
+    path: list[tuple[int, int]] = []  # (if id, branch index) of every open conditional
+    n_if = 0
+    seen: dict[str, list[tuple[int, tuple[tuple[int, int], ...]]]] = {}
+    found: list[tuple[str, int, int]] = []
+    for no, line in enumerate(text.split("\n"), 1):
+        line = line.split("//", 1)[0]
+        if _COND_IF.match(line):
+            n_if += 1
+            path.append((n_if, 0))
+            continue
+        if _COND_ELSE.match(line) and path:
+            i, b = path[-1]
+            path[-1] = (i, b + 1)
+            continue
+        if _COND_END.match(line) and path:
+            path.pop()
+            continue
+        m = _LABEL_DEF.match(line)
+        if not m:
+            continue
+        name, here = m.group(1), tuple(path)
+        for first, there in seen.get(name, []):
+            branches = dict(there)
+            if not any(i in branches and branches[i] != b for i, b in here):
+                found.append((name, first, no))
+                break
+        seen.setdefault(name, []).append((no, here))
+    return found
+
+
+def assemble(
+    source: str, section: str | None = None, _check_hazards: bool = True
+) -> SharcObject:
+    dups = duplicate_labels(source)
+    if dups:
+        raise PkSharcError(
+            "label defined twice (selas would bind every reference to one of them):\n"
+            + "\n".join(f"  line {b}: {n} (first at line {a}:)" for n, a, b in dups)
+        )
+    if _check_hazards and _negative_shift_patched(str(_tool("selas"))):
+        _check_hazards = False
+    for pat, why in ENCODE_HAZARDS if _check_hazards else []:
         m = pat.search(source)
         if m:
             raise PkSharcError(f"known Selache encode bug ({why}): {m.group(0)!r}")
@@ -299,7 +411,23 @@ def assemble(source: str, section: str | None = None) -> SharcObject:
         )
         if r.returncode:
             raise PkSharcError(f"selas failed:\n{r.stdout}{r.stderr}")
-        result = _object(obj, hashlib.sha256(original.encode()).hexdigest(), section)
+        pre = Path(d) / "m.i"
+        subprocess.run(
+            [
+                str(_tool("selas")),
+                "-proc",
+                PROCESSOR,
+                "--preprocess-only",
+                "-o",
+                str(pre),
+                str(src),
+            ],
+            capture_output=True,
+            check=True,
+        )
+        result = _object(
+            obj, hashlib.sha256(original.encode()).hexdigest(), section, pre.read_text()
+        )
         _sw_apply(result, sw_marks)
         for name, size, is_bss in bss_decls:
             if size <= 0 or size % 4:
@@ -312,19 +440,168 @@ def assemble(source: str, section: str | None = None) -> SharcObject:
         return result
 
 
-def compile_c(source: str, section: str | None = None) -> SharcObject:
-    """Selache's C compiler (selcc); evaluated in docs/findings/20-patch-toolchains.md."""
+def compile_c(
+    source: str,
+    section: str | None = None,
+    include_dirs: tuple[Path, ...] | list[Path] = (),
+    defines: tuple[str, ...] | list[str] = (),
+    name: str = "C source",
+) -> SharcObject:
+    """Selache's C compiler (selcc); evaluated in docs/findings/20-patch-toolchains.md.
+
+    `include_dirs` go on the include path (`-I`), `defines` are `NAME` or `NAME=VALUE` (`-D`). The object's
+    source_sha256 is the hash of the preprocessed translation unit, so a changed header changes it. selcc's code is
+    one section (`seg_swco`); a translation unit that it splits over several code sections is refused, and so is
+    one that names a union member other than the first (selcc places union members like struct members;
+    tools/patchkit/pk_cunion.py). `name` labels the source in errors."""
+    flags = [f"-I{p}" for p in include_dirs] + [f"-D{x}" for x in defines]
     with tempfile.TemporaryDirectory(prefix="pk-sharc-") as d:
-        src, obj = Path(d) / "m.c", Path(d) / "m.doj"
+        src, obj, pre = Path(d) / "m.c", Path(d) / "m.doj", Path(d) / "m.i"
         src.write_text(source)
         r = subprocess.run(
-            [str(_tool("selcc")), "-proc", PROCESSOR, "-c", "-o", str(obj), str(src)],
+            [
+                str(_tool("selcc")),
+                "-proc",
+                PROCESSOR,
+                *flags,
+                "-E",
+                "-o",
+                str(pre),
+                str(src),
+            ],
             capture_output=True,
             text=True,
         )
         if r.returncode:
             raise PkSharcError(f"selcc failed:\n{r.stdout}{r.stderr}")
-        return _object(obj, hashlib.sha256(source.encode()).hexdigest(), section)
+        unions = pk_cunion.check(pre.read_text())
+        if unions:
+            raise PkSharcError(pk_cunion.message(unions, name))
+        r = subprocess.run(
+            [
+                str(_tool("selcc")),
+                "-proc",
+                PROCESSOR,
+                *flags,
+                "-c",
+                "-o",
+                str(obj),
+                str(src),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode:
+            raise PkSharcError(f"selcc failed:\n{r.stdout}{r.stderr}")
+        asm = Path(d) / "m.s"
+        r = subprocess.run(
+            [
+                str(_tool("selcc")),
+                "-proc",
+                PROCESSOR,
+                *flags,
+                "-S",
+                "-o",
+                str(asm),
+                str(src),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode:
+            raise PkSharcError(f"selcc -S failed:\n{r.stdout}{r.stderr}")
+        elf = pk_elf.parse(obj.read_bytes())
+        code = sorted(
+            x.name
+            for x in elf.sections
+            if x.flags & pk_elf.SHF_EXECINSTR and x.flags & pk_elf.SHF_ALLOC and x.size
+        )
+        if len(code) > 1:
+            raise PkSharcError(
+                f"selcc split the code over sections {code}; patchkit objects have one code section"
+            )
+        result = _object(
+            obj,
+            hashlib.sha256(pre.read_bytes()).hexdigest(),
+            code[0] if code else section,
+            compiled_asm=asm.read_text(),
+        )
+        result.toolchain["selcc_sha256"] = hashlib.sha256(
+            _tool("selcc").read_bytes()
+        ).hexdigest()
+        return result
+
+
+def merge(objs: list[SharcObject]) -> SharcObject:
+    """Several objects (assembled and compiled) as one: the code sections back to back in list order, data sections
+    of the same name joined (each piece at its alignment), symbols and relocations moved with their section.
+
+    A local symbol whose name is already taken by an earlier object is renamed `name~k` (k = the object's index) in
+    that object, together with the relocations that use it; a second definition of a global symbol is an error.
+    Relocations inside data sections are not supported (`_object` refuses them)."""
+    if len(objs) == 1:
+        return objs[0]
+    code = bytearray()
+    symbols: dict[str, tuple[int, bool]] = {}
+    relocs: list[SharcReloc] = []
+    rows: list[tuple[int, str]] = []
+    data: dict[str, tuple[bytes, int, bool]] = {}
+    data_symbols: dict[str, tuple[str, int, bool]] = {}
+    toolchain: dict[str, str] = {}
+    hashes = []
+    for k, o in enumerate(objs):
+        base = len(code) // 2
+        taken = set(symbols) | set(data_symbols)
+        defined = {
+            **{n: g for n, (_, g) in o.symbols.items()},
+            **{n: g for n, (_, _, g) in o.data_symbols.items()},
+        }
+        rename: dict[str, str] = {}
+        for name, glob in defined.items():
+            if name in taken:
+                if glob:
+                    raise PkSharcError(
+                        f"symbol {name} is defined by two sources of one object"
+                    )
+                rename[name] = f"{name}~{k}"
+        for name, (off, glob) in o.symbols.items():
+            symbols[rename.get(name, name)] = (base + off, glob)
+        for r in o.relocs:
+            relocs.append(
+                SharcReloc(
+                    base + r.parcel, r.rtype, rename.get(r.symbol, r.symbol), r.addend
+                )
+            )
+        rows += [(base + p, raw) for p, raw in o.rows]
+        code += o.section
+        for sec, (blob, align, bss) in o.data.items():
+            have, have_align, have_bss = data.get(sec, (b"", align, bss))
+            if have_bss != bss:
+                raise PkSharcError(
+                    f"data section {sec} is bss in one source and data in another"
+                )
+            start = -(-len(have) // align) * align
+            data[sec] = (
+                have + bytes(start - len(have)) + blob,
+                max(align, have_align),
+                bss,
+            )
+            for name, (s, off, glob) in o.data_symbols.items():
+                if s == sec:
+                    data_symbols[rename.get(name, name)] = (sec, start + off, glob)
+        for key, value in o.toolchain.items():
+            toolchain.setdefault(key, value)
+        hashes.append(o.source_sha256)
+    return SharcObject(
+        hashlib.sha256(" ".join(hashes).encode()).hexdigest(),
+        bytes(code),
+        symbols,
+        relocs,
+        rows,
+        toolchain,
+        data,
+        data_symbols,
+    )
 
 
 def self_check(code: bytearray, at: int, size: int, r: SharcReloc) -> None:

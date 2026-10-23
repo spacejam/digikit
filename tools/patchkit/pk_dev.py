@@ -55,7 +55,9 @@ class Dev:
         self.goldens = h.Goldens()
         self.session = h.Session(cell, self.goldens, run_name=f"dev-{cell.device}")
         self.opened = False
-        self.out = ROOT / "out" / "patch" / f"dev-{cell.device}-{cell.firmware}.syx"
+        self.out = (
+            ROOT / "out" / "patch" / f"dev-{cell.device}-{cell.firmware}.ungated.syx"
+        )
 
     def start(self) -> None:
         # the daemon starts on the stock firmware; the first iteration loads the patched image
@@ -83,6 +85,8 @@ class Dev:
                 str(self.session.syx),
                 "--modules",
                 ",".join(self.cell.modules),
+                # Developer-loop images go to the emulator, not the unit; the gate would stop DSP modules.
+                "--no-encoding-gate",
                 "-o",
                 str(self.out),
             ],

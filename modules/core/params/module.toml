@@ -1,6 +1,6 @@
 [module]
 id = "core/params"
-version = "0.2.0"
+version = "0.3.0"
 name = "Parameter descriptors"
 category = "core"
 status = "experimental"
@@ -21,6 +21,8 @@ conflicts = []
 #     min = 0
 #     max = 0x7f00
 #     default = 0x4000
+#     formatter = "my_fmt"    # optional: a ColdFire function of the module, void my_fmt(int raw, char *buf), that writes
+#                             # the value text (the header `Name=value`); 0 or absent = the template's formatter
 #
 # The code of a parameter is `params.first + k` (symbol params.<id>.index); a machine's fields name it. Finding 02,
 # "core.params": the table is copied at patch time from the image (nothing of the firmware is stored here), the
@@ -67,6 +69,14 @@ kind = "u32"
 [[registry.field]]
 name = "default"
 kind = "u32"
+[[registry.field]]
+name = "formatter"          # ColdFire code address of the value formatter fmt(int raw, char *buf); 0 = the template's
+kind = "u32"
+default = 0
+[[registry.field]]
+name = "randomize"          # SRC+YES: 0 = the template's randomizer (none for the LEV template), 1 = uniform over min .. max in
+kind = "u32"                # steps of 0x100, else a ColdFire function fn(rnd, min, max) -> raw value (src/cf/dt2/randomize.s)
+default = 0
 
 [[registry]]
 name = "params"
@@ -98,9 +108,15 @@ kind = "u32"
 [[registry.field]]
 name = "default"
 kind = "u32"
+[[registry.field]]
+name = "formatter"          # ColdFire code address of the value formatter fmt(int raw, char *buf); 0 = the template's
+kind = "u32"
+default = 0
 
 # the parameter table, 60-byte rows: owner, mirror index, min, max, default, flag, (cc << 16 | kind), 0x80 + slot,
-# 2 words of the template, name, template word, short, template formatter, template word
+# 2 words of the template, name, template word, short, formatter, template word. The formatter (+0x34) is the entry's
+# `formatter` when non-zero, else the template's: the manifest language has no conditional, so the template's word is
+# masked with ~((f | -f) >> 62), which is 0 for any f != 0 and -1 for f = 0 (the values are 64-bit)
 [[section]]
 name = "pf_table"
 region = "cf.expansion"
@@ -120,7 +136,7 @@ append = { registry = "params", row = [
   "$name",
   "image.u32(cf.params.t1 + 60 * $template + 0x2c)",
   "$short",
-  "image.u32(cf.params.t1 + 60 * $template + 0x34)",
+  "$formatter | (image.u32(cf.params.t1 + 60 * $template + 0x34) & ~(($formatter | -$formatter) >> 62))",
   "image.u32(cf.params.t1 + 60 * $template + 0x38)",
 ] }
 
@@ -145,7 +161,7 @@ append = { registry = "params", row = [
   "$name",
   "image.u32(cf.params.t1 + 60 * $template + 0x2c)",
   "$short",
-  "image.u32(cf.params.t1 + 60 * $template + 0x34)",
+  "$formatter | (image.u32(cf.params.t1 + 60 * $template + 0x34) & ~(($formatter | -$formatter) >> 62))",
   "image.u32(cf.params.t1 + 60 * $template + 0x38)",
 ] }
 
@@ -161,6 +177,36 @@ _pf_count = "params.count"
 _pf_rows = "params.rows"
 _pf_rowsize = "params.row_size"
 _pf_t_t2 = "hook.cf.params.t2.4.tail"
+
+# SRC+YES for added parameters (src/cf/dt2/randomize.s; finding 02, "SRC+YES randomizes a page")
+[[object]]
+path = "build/params-randomize-dt2.dko.json"
+sources = ["src/cf/dt2/randomize.s"]
+place = "cf.expansion"
+devices = ["dt2"]
+
+[object.externs]
+_pf_first = "params.first"
+_pf_count = "params.count"
+_pf_rows = "params.rows"
+_pf_rowsize = "params.row_size"
+_pf_rand = "cf.params.rand"
+_pf_write = "cf.params.write"
+_pf_t_rnd = "hook.cf.params.randone.tail"
+
+# the knob bar of an added parameter spans the row's range (src/cf/dt2/barscale.s)
+[[object]]
+path = "build/params-barscale-dt2.dko.json"
+sources = ["src/cf/dt2/barscale.s"]
+place = "cf.expansion"
+devices = ["dt2"]
+
+[object.externs]
+_pf_first = "params.first"
+_pf_count = "params.count"
+_pf_rows = "params.rows"
+_pf_rowsize = "params.row_size"
+_pf_t_draw = "hook.cf.params.drawone.tail"
 
 [[object]]
 path = "build/params-dn2.dko.json"
@@ -182,6 +228,26 @@ cpu = "cf"
 anchor = "cf.params.t2"
 offset = 4
 to = "pf_t2"
+displaced = "run"
+devices = ["dt2"]
+
+# the knob drawer (ParameterSet::vfunc_24): the value of an added code is mapped from its range onto 0 .. 0x7f00
+[[op]]
+op = "hook"
+cpu = "cf"
+anchor = "cf.params.drawone"
+offset = 0
+to = "pf_drawone"
+displaced = "run"
+devices = ["dt2"]
+
+# the per-code randomizer (ParameterSet::vfunc_7): an added code with a `randomize` value picks and writes its own value
+[[op]]
+op = "hook"
+cpu = "cf"
+anchor = "cf.params.randone"
+offset = 0
+to = "pf_randone"
 displaced = "run"
 devices = ["dt2"]
 
@@ -273,6 +339,50 @@ kind = "cf_params_bounds"
 mark = "D"
 exclude_anchors = ["cf.params.t2"]
 
+
+# SRC+YES (1.17): the per-code randomizer `ParameterSet::vfunc_7(this, code)` (entry: `link.w a6,#-0x34; movem.l d2-d5`), the
+# firmware's 15-bit generator (an LCG on a global, returns 0 .. 0x7fff) and the value writer
+# `ParameterSet::setValue(this, code, value, -1, 0, 1, 1)` that both the stock randomizer and the UI use
+[[anchor_rule]]
+name = "cf.params.randone"
+devices = ["dt2"]
+cpu = "cf"
+kind = "cf_func"
+hash = "2f5c230d1f2850085a8499aa99b7a461"
+offset = 0x0
+len = 8
+mark = "D"
+
+# the knob drawer `ParameterSet::vfunc_24(this, code, value, ...)` (entry: `lea -0x14(a7),a7; movem.l d2-d6,(a7)`)
+[[anchor_rule]]
+name = "cf.params.drawone"
+devices = ["dt2"]
+cpu = "cf"
+kind = "cf_func"
+hash = "aabec4ab92ef9e78d32bb1c4f9121435"
+offset = 0x0
+len = 8
+mark = "D"
+
+[[anchor_rule]]
+name = "cf.params.rand"
+devices = ["dt2"]
+cpu = "cf"
+kind = "cf_func"
+hash = "62e6d786577d1378a58ccafd1c524496"
+offset = 0x0
+len = 6
+mark = "D"
+
+[[anchor_rule]]
+name = "cf.params.write"
+devices = ["dt2"]
+cpu = "cf"
+kind = "cf_func"
+hash = "89d965df70565c490efde3016d66a843"
+offset = 0x0
+len = 6
+mark = "D"
 
 # ---- anchor rules (Digitone II) -------------------------------------------------------------------------------------------------------
 

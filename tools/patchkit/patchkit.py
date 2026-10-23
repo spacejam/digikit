@@ -3,12 +3,19 @@
 
     uv run python -m tools.patchkit.patchkit bin                       print the path of the built binary
     uv run python -m tools.patchkit.patchkit patch --firmware X.syx --modules a,b [-o OUT.syx]   apply; writes out/patch/
+    uv run python -m tools.patchkit.patchkit apply ...                                           the same as patch (gated)
     uv run python -m tools.patchkit.patchkit explain --firmware X.syx --modules a,b              site-by-site account
     uv run python -m tools.patchkit.patchkit list|inspect|check|verify ...                       passed through
     uv run python -m tools.patchkit.patchkit bundle [-o FILE] [--modules-dir DIR]  ports + modules as one JSON (what patchkit.wasm reads)
     uv run python -m tools.patchkit.patchkit inject [OUT.syx] [--hot]  load a patched image into the running emulator
 
-`patch` defaults the output to out/patch/<firmware stem>+<modules>.syx and writes plan.json next to it. `explain`
+`patch` first checks that every committed object (build/*.dko.json) of the selected modules and their `requires` closure
+matches its sources (pk_build, as `pk_build build-all --check`); a stale one refuses the patch (exit 1, nothing written).
+`--allow-stale-objects` builds anyway and names the image *.stale.syx.
+`patch` defaults the output to out/patch/<firmware stem>+<modules>.syx and writes plan.json next to it, then runs the
+encoding gate (tools/patchkit/pk_encoding_gate.py): a refused image is deleted; with --no-encoding-gate the image is
+renamed *.ungated.syx. `apply` here is `patch`: only the Rust binary's own `apply` (test fixtures, oracles) writes an
+image without the gate. `explain`
 adds a SHARC+ listing of the DSP sites to the report of the Rust binary. Output files are firmware-derived: they stay
 under out/ and are never committed.
 """
@@ -173,6 +180,42 @@ def cmd_explain(args: list[str]) -> int:
     return 0
 
 
+UNGATED = ".ungated.syx"
+
+
+STALE = ".stale.syx"
+
+
+def module_closure(ids: list[str]) -> list[Path]:
+    """The directories of the selected modules and of everything they require (modules/<id>/module.toml)."""
+    seen: dict[str, Path] = {}
+    todo = list(ids)
+    while todo:
+        mid = todo.pop()
+        d = ROOT / "modules" / mid
+        if mid in seen or not (d / "module.toml").is_file():
+            continue
+        seen[mid] = d
+        todo += tomllib.loads((d / "module.toml").read_text())["module"].get(
+            "requires", []
+        )
+    return [seen[k] for k in sorted(seen)]
+
+
+def stale_objects(ids: list[str]) -> list[str]:
+    """Why a committed object (build/*.dko.json) of the selected modules or their requirements no longer matches its
+    sources (empty: all current). Fail closed: a module that cannot be checked is reported too."""
+    from tools.patchkit import pk_build
+
+    out = []
+    for d in module_closure(ids):
+        try:
+            pk_build.build_module(d, check=True)
+        except Exception as e:  # noqa: BLE001
+            out.append(str(e))
+    return out
+
+
 def cmd_patch(args: list[str]) -> int:
     fw, mods = flag(args, "--firmware"), flag(args, "--modules")
     if not fw or not mods:
@@ -183,11 +226,84 @@ def cmd_patch(args: list[str]) -> int:
         d.mkdir(parents=True, exist_ok=True)
         out = str(d / f"{Path(fw).stem}+{re.sub(r'[^A-Za-z0-9.-]+', '_', mods)}.syx")
     plan = flag(args, "--plan") or str(Path(out).with_suffix(".plan.json"))
-    rest = [a for a in args if a not in ("-o", out, "--plan", plan)]
+    gate = "--no-encoding-gate" not in args
+    stale = stale_objects([m for m in mods.split(",") if m])
+    if stale and "--allow-stale-objects" not in args:
+        print(
+            "patch refused: a committed object is stale or cannot be checked (nothing was written):",
+            *stale,
+            "run `uv run python -m tools.patchkit.pk_build build <module>` (or `mise run patch:build`) first",
+            sep="\n  ",
+            file=sys.stderr,
+        )
+        return 1
+    rest = [
+        a
+        for a in args
+        if a
+        not in (
+            "-o",
+            out,
+            "--plan",
+            plan,
+            "--no-encoding-gate",
+            "--allow-stale-objects",
+        )
+    ]
     r = run(["apply", *rest, "-o", out, "--plan", plan])
-    if r.returncode == 0:
-        print(f"plan: {plan}")
-    return r.returncode
+    if r.returncode != 0:
+        return r.returncode
+    print(f"plan: {plan}")
+    if not gate and not out.endswith(UNGATED):
+        # An image that skipped the gate is named so: it is never the default for `inject`.
+        final = out[: -len(".syx")] + UNGATED if out.endswith(".syx") else out + UNGATED
+        os.replace(out, final)
+        out = final
+    if stale and not out.endswith(STALE):
+        final = out[: -len(".syx")] + STALE if out.endswith(".syx") else out + STALE
+        os.replace(out, final)
+        out = final
+        print(f"image built from STALE objects: {out}")
+    if not gate:
+        print(f"ungated image: {out}")
+    return encoding_gate(Path(out), Path(plan), gate)
+
+
+def encoding_gate(out: Path, plan: Path, enforce: bool) -> int:
+    """Refuse (delete OUT, exit 1) a patched image whose added DSP code has an unproven encoding shape.
+
+    With enforce False (--no-encoding-gate, diagnostic images only) the violations are a warning."""
+    from tools.patchkit import pk_encoding_gate
+
+    try:
+        found = pk_encoding_gate.check_image(out, plan)
+    except (Exception, SystemExit) as e:  # noqa: BLE001
+        if not enforce:
+            print(
+                f"WARNING: --no-encoding-gate: gate could not run: {e!r}",
+                file=sys.stderr,
+            )
+            return 0
+        out.unlink(missing_ok=True)
+        print(f"encoding gate failed ({e!r}); {out} deleted", file=sys.stderr)
+        return 1
+    if not found:
+        return 0
+    lines = "\n".join(pk_encoding_gate.format_violation(v) for v in found)
+    if enforce:
+        out.unlink(missing_ok=True)
+        print(
+            f"encoding gate: {len(found)} instruction(s) with an encoding shape that is in "
+            f"neither stock 1.17 DSP code nor encoding_proven.toml; {out} deleted\n{lines}",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"WARNING: --no-encoding-gate: {out} has {len(found)} unproven instruction(s); "
+        f"do not flash it\n{lines}",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def cmd_inject(args: list[str]) -> int:
@@ -196,7 +312,12 @@ def cmd_inject(args: list[str]) -> int:
     syx = next((a for a in args if not a.startswith("-")), None)
     if syx is None:
         outs = sorted(
-            (ROOT / "out" / "patch").glob("*.syx"), key=lambda p: p.stat().st_mtime
+            (
+                p
+                for p in (ROOT / "out" / "patch").glob("*.syx")
+                if not p.name.endswith(UNGATED)
+            ),
+            key=lambda p: p.stat().st_mtime,
         )
         if not outs:
             raise SystemExit(
@@ -228,13 +349,14 @@ def main(argv: list[str]) -> int:
         )
         print(out)
         return 0
-    if cmd == "patch":
+    if cmd in ("patch", "apply"):
+        # `apply` through the front end is gated like `patch`; the ungated Rust `apply` stays for test fixtures
         return cmd_patch(args)
     if cmd == "explain":
         return cmd_explain(args)
     if cmd == "inject":
         return cmd_inject(args)
-    if cmd in ("list", "inspect", "check", "verify", "apply", "rebuild"):
+    if cmd in ("list", "inspect", "check", "verify", "rebuild"):
         return run([cmd, *args]).returncode
     print(__doc__)
     return 2

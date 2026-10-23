@@ -1,0 +1,96 @@
+{
+ "arch": "cf",
+ "format": 1,
+ "relocs": [
+  {
+   "addend": 0,
+   "offset": 6,
+   "section": ".text",
+   "symbol": "_pf_first",
+   "type": "cf.32"
+  },
+  {
+   "addend": 0,
+   "offset": 12,
+   "section": ".text",
+   "symbol": "_pf_count",
+   "type": "cf.32"
+  },
+  {
+   "addend": 0,
+   "offset": 20,
+   "section": ".text",
+   "symbol": "_pf_rowsize",
+   "type": "cf.32"
+  },
+  {
+   "addend": 0,
+   "offset": 30,
+   "section": ".text",
+   "symbol": "_pf_rows",
+   "type": "cf.32"
+  },
+  {
+   "addend": 0,
+   "offset": 90,
+   "section": ".text",
+   "symbol": "_pf_t_draw",
+   "type": "cf.32"
+  }
+ ],
+ "sections": [
+  {
+   "align": 4,
+   "hex": "202f00080480000000000c80000000006446223c000000004c01080006800000000020402228001492a800106f2a0c8100007f006722202f000c90a800106c027000b0816f022001e1882240ef8890894c4100002f40000c4ef900000000",
+   "kind": "text",
+   "name": ".text",
+   "size": 94
+  }
+ ],
+ "source_sha256": "69b7e94ac26d1842e8fb22c90f5a38e64f202c664055e15b096dcab8e7b8f600",
+ "symbols": [
+  {
+   "global": true,
+   "name": "_pf_count",
+   "section": null,
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "_pf_first",
+   "section": null,
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "_pf_rows",
+   "section": null,
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "_pf_rowsize",
+   "section": null,
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "_pf_t_draw",
+   "section": null,
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "pf_drawone",
+   "section": ".text",
+   "value": 0
+  }
+ ],
+ "toolchain": {
+  "as": "GNU assembler (GNU Binutils) 2.47.20260726",
+  "cflags": "-mcpu=54418 -Os -ffreestanding -fno-builtin -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-stack-protector -Wall -Wextra -Werror",
+  "gcc": "m68k-elf-gcc (GCC) 16.2.0",
+  "instructions_redecoded": "27",
+  "ld": "GNU ld (GNU Binutils) 2.47.20260726"
+ }
+}

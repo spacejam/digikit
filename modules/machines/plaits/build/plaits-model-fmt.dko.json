@@ -1,0 +1,395 @@
+{
+ "arch": "cf",
+ "format": 1,
+ "relocs": [
+  {
+   "addend": 100,
+   "offset": 20,
+   "section": ".text",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 0,
+   "offset": 28,
+   "section": ".text",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 104,
+   "offset": 0,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 107,
+   "offset": 4,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 116,
+   "offset": 8,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 120,
+   "offset": 12,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 128,
+   "offset": 16,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 137,
+   "offset": 20,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 147,
+   "offset": 24,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 153,
+   "offset": 28,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 160,
+   "offset": 32,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 166,
+   "offset": 36,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 172,
+   "offset": 40,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 177,
+   "offset": 44,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 184,
+   "offset": 48,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 190,
+   "offset": 52,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 195,
+   "offset": 56,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 201,
+   "offset": 60,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 207,
+   "offset": 64,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 214,
+   "offset": 68,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 225,
+   "offset": 72,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 231,
+   "offset": 76,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 237,
+   "offset": 80,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 243,
+   "offset": 84,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 249,
+   "offset": 88,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 257,
+   "offset": 92,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  },
+  {
+   "addend": 269,
+   "offset": 96,
+   "section": ".rodata",
+   "symbol": ".sec..rodata",
+   "type": "cf.32"
+  }
+ ],
+ "sections": [
+  {
+   "align": 4,
+   "hex": "202f0004e080226f00080c8000000018630841f900000000600a41f90000000020700c0012d866fc4e75",
+   "kind": "text",
+   "name": ".text",
+   "size": 42
+  },
+  {
+   "align": 4,
+   "hex": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000455252005641004153594d2d5452490032464d00464f524d414e5400414444495449564500574156455441424c450043484f52440053504545434800535741524d004e4f495345004455535400535452494e470052494e4753004b49434b00534e415245004849484154005643462d56410050484153452d44495354004458372d31004458372d32004458372d33004458372d34005445525241494e00535452494e47204d4143480053515541524500",
+   "kind": "data",
+   "name": ".rodata",
+   "size": 276
+  }
+ ],
+ "source_sha256": "fb601761052e9a63e6c784ee081e804905b9a75e95b783ea7c1f233c1ee033a8",
+ "symbols": [
+  {
+   "global": false,
+   "name": ".sec..rodata",
+   "section": ".rodata",
+   "value": 0
+  },
+  {
+   "global": true,
+   "name": "plaits_model_fmt",
+   "section": ".text",
+   "value": 0
+  },
+  {
+   "global": false,
+   "name": "pm0",
+   "section": ".rodata",
+   "value": 104
+  },
+  {
+   "global": false,
+   "name": "pm1",
+   "section": ".rodata",
+   "value": 107
+  },
+  {
+   "global": false,
+   "name": "pm10",
+   "section": ".rodata",
+   "value": 172
+  },
+  {
+   "global": false,
+   "name": "pm11",
+   "section": ".rodata",
+   "value": 177
+  },
+  {
+   "global": false,
+   "name": "pm12",
+   "section": ".rodata",
+   "value": 184
+  },
+  {
+   "global": false,
+   "name": "pm13",
+   "section": ".rodata",
+   "value": 190
+  },
+  {
+   "global": false,
+   "name": "pm14",
+   "section": ".rodata",
+   "value": 195
+  },
+  {
+   "global": false,
+   "name": "pm15",
+   "section": ".rodata",
+   "value": 201
+  },
+  {
+   "global": false,
+   "name": "pm16",
+   "section": ".rodata",
+   "value": 207
+  },
+  {
+   "global": false,
+   "name": "pm17",
+   "section": ".rodata",
+   "value": 214
+  },
+  {
+   "global": false,
+   "name": "pm18",
+   "section": ".rodata",
+   "value": 225
+  },
+  {
+   "global": false,
+   "name": "pm19",
+   "section": ".rodata",
+   "value": 231
+  },
+  {
+   "global": false,
+   "name": "pm2",
+   "section": ".rodata",
+   "value": 116
+  },
+  {
+   "global": false,
+   "name": "pm20",
+   "section": ".rodata",
+   "value": 237
+  },
+  {
+   "global": false,
+   "name": "pm21",
+   "section": ".rodata",
+   "value": 243
+  },
+  {
+   "global": false,
+   "name": "pm22",
+   "section": ".rodata",
+   "value": 249
+  },
+  {
+   "global": false,
+   "name": "pm23",
+   "section": ".rodata",
+   "value": 257
+  },
+  {
+   "global": false,
+   "name": "pm24",
+   "section": ".rodata",
+   "value": 269
+  },
+  {
+   "global": false,
+   "name": "pm3",
+   "section": ".rodata",
+   "value": 120
+  },
+  {
+   "global": false,
+   "name": "pm4",
+   "section": ".rodata",
+   "value": 128
+  },
+  {
+   "global": false,
+   "name": "pm5",
+   "section": ".rodata",
+   "value": 137
+  },
+  {
+   "global": false,
+   "name": "pm6",
+   "section": ".rodata",
+   "value": 147
+  },
+  {
+   "global": false,
+   "name": "pm7",
+   "section": ".rodata",
+   "value": 153
+  },
+  {
+   "global": false,
+   "name": "pm8",
+   "section": ".rodata",
+   "value": 160
+  },
+  {
+   "global": false,
+   "name": "pm9",
+   "section": ".rodata",
+   "value": 166
+  },
+  {
+   "global": false,
+   "name": "pm_err",
+   "section": ".rodata",
+   "value": 100
+  },
+  {
+   "global": false,
+   "name": "pm_names",
+   "section": ".rodata",
+   "value": 0
+  }
+ ],
+ "toolchain": {
+  "as": "GNU assembler (GNU Binutils) 2.47.20260726",
+  "cflags": "-mcpu=54418 -Os -ffreestanding -fno-builtin -nostdlib -fno-pic -fno-pie -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-stack-protector -Wall -Wextra -Werror",
+  "gcc": "m68k-elf-gcc (GCC) 16.2.0",
+  "instructions_redecoded": "12",
+  "ld": "GNU ld (GNU Binutils) 2.47.20260726"
+ }
+}

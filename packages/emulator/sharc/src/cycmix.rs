@@ -1,13 +1,18 @@
 //! Exact executed-instruction profile for cycle costing (diagnostic, off by default).
 //! `SHARC_CYCMIX=1` with `SHARC_CYCMIX_OUT=path.tsv` (or `DIGI_DIAG_DIR`), and optionally
-//! `SHARC_CYCMIX_MEM=file` with lines `pc nbytes branch delayed [i1 [i2]]` (hex software PC, instruction
-//! bytes, branch 0 none / 1 unconditional / 2 conditional, delayed 0/1, decimal I register numbers 0..15 used as
-//! the DAG base of the data accesses of that instruction). The file is made by tools/sharc_dev/sharc_cpi.py
-//! from the program database; without it only the per-PC counts and pairs are written.
+//! `SHARC_CYCMIX_MEM=file` with lines `pc nbytes branch delayed [slot1 [slot2]]` (hex software PC, instruction
+//! bytes, branch 0 none / 1 unconditional / 2 conditional, delayed 0/1, one slot per data access of that
+//! instruction). A slot is `I` (the decimal DAG base register 0..15, post-modify: the access is at I), or
+//! `I+mM/S` (pre-modify by register MM) or `I+K/S` (pre-modify by the immediate K), S being the access size in
+//! bytes (1, 2 or 4) by which a byte-space modifier is scaled (PRM p. 6-9, Table 6-2; word-space modifiers are
+//! not scaled). The file is made by tools/sharc_dev/sharc_cpi.py from the program database; without it only the
+//! per-PC counts and pairs are written.
 //!
 //! Besides the counts the profile simulates, online, three structures whose hit rates depend on the order of
 //! execution: the 2-way L1 instruction cache for code in L2 (line 64 bytes, PRM Table 8-1: 512 bits), the two 2-way data
-//! caches (DM, kind `d`, and PM, kind `p`; PRM p. 8-7) for L2 and external data (line 64 bytes), each at 16, 32 and 64 KB, and the branch target buffer (128 sets x 2 ways,
+//! caches (DM, kind `d`, and PM, kind `p`; PRM p. 8-7) for L2 and external data (line 64 bytes of the physical byte
+//! address: a normal-word address is mapped to its byte address first, so both spaces share lines; the line is
+//! taken from the effective address, I plus the pre-modify), each at 16, 32 and 64 KB, and the branch target buffer (128 sets x 2 ways,
 //! set = low seven bits of the short-word PC, 2-bit counter, LRU). Sizes and indexing are the manual's where it
 //! gives them and assumptions where it does not (see tools/sharc_dev/sharc_timing.py).
 //!
@@ -78,6 +83,41 @@ struct Spec {
     delayed: bool,
     nregs: u8,
     regs: [u8; 2],
+    /// Per slot: 0 post-modify (the access is at I), 1 pre-modify by M register `modv`, 2 pre-modify by `modv`.
+    modk: [u8; 2],
+    modv: [i32; 2],
+    /// Per slot: the byte-space scale of the modifier (access size in bytes).
+    scale: [u8; 2],
+}
+
+/// One memspec slot: `I`, `I+mM/S` or `I+K/S` (see the module comment).
+fn parse_slot(x: &str) -> Option<(u8, u8, i32, u8)> {
+    let (reg, rest) = match x.split_once('+') {
+        Some((r, m)) => (r, Some(m)),
+        None => (x, None),
+    };
+    let reg: u8 = reg.parse().ok().filter(|r| *r < 16)?;
+    let Some(rest) = rest else {
+        return Some((reg, 0, 0, 4));
+    };
+    let (m, scale) = rest.split_once('/').unwrap_or((rest, "4"));
+    let scale: u8 = scale.parse().unwrap_or(4);
+    if let Some(mr) = m.strip_prefix('m') {
+        let mr: i32 = mr.parse().ok().filter(|r| (0..16).contains(r))?;
+        Some((reg, 1, mr, scale))
+    } else {
+        Some((reg, 2, m.parse().ok()?, scale))
+    }
+}
+
+/// The physical cache line (64 bytes) of an effective data address; the short-word code space keeps its own
+/// numbering (32 short words per line).
+pub fn data_line(a: u32) -> u32 {
+    if (0xb80000..0xc0c000).contains(&a) {
+        a >> 5
+    } else {
+        sharc_rt::addressing::normal_word_or_same(a) >> 6
+    }
 }
 
 struct Pending {
@@ -140,14 +180,14 @@ impl CycMix {
                 let Ok(pc) = u32::from_str_radix(f[0].trim_start_matches("0x"), 16) else {
                     continue;
                 };
-                let regs: Vec<u8> = f[4..]
-                    .iter()
-                    .filter_map(|x| x.parse().ok())
-                    .filter(|r| *r < 16)
-                    .collect();
+                let slots: Vec<(u8, u8, i32, u8)> =
+                    f[4..].iter().filter_map(|x| parse_slot(x)).collect();
                 let mut r2 = [0u8; 2];
-                for (k, r) in regs.iter().take(2).enumerate() {
-                    r2[k] = *r;
+                let mut modk = [0u8; 2];
+                let mut modv = [0i32; 2];
+                let mut scale = [4u8; 2];
+                for (k, sl) in slots.iter().take(2).enumerate() {
+                    (r2[k], modk[k], modv[k], scale[k]) = *sl;
                 }
                 spec.insert(
                     pc,
@@ -155,8 +195,11 @@ impl CycMix {
                         nbytes: f[1].parse().unwrap_or(2),
                         branch: f[2].parse().unwrap_or(0),
                         delayed: f[3] == "1",
-                        nregs: regs.len().min(2) as u8,
+                        nregs: slots.len().min(2) as u8,
                         regs: r2,
+                        modk,
+                        modv,
+                        scale,
                     },
                 );
             }
@@ -305,7 +348,20 @@ impl CycMix {
             let slots = self.mem.entry(pc).or_default();
             let mut seen = [usize::MAX; 2];
             for k in 0..spec.nregs as usize {
-                let a = s.r[16 + spec.regs[k] as usize].b;
+                let i = s.r[16 + spec.regs[k] as usize].b;
+                let a = if spec.modk[k] == 0 {
+                    i
+                } else {
+                    let m = if spec.modk[k] == 1 {
+                        s.r[32 + spec.modv[k] as usize].b as i32
+                    } else {
+                        spec.modv[k]
+                    };
+                    // A word-space address takes the modifier unscaled, a byte-space one scaled by the access size.
+                    let word_space = sharc_rt::addressing::normal_word_or_same(i) != i;
+                    let m = if word_space { m } else { m.wrapping_mul(spec.scale[k] as i32) };
+                    i.wrapping_add(m as u32)
+                };
                 let b = bucket(a);
                 slots[k][b] += 1;
                 seen[k] = b;
@@ -314,14 +370,7 @@ impl CycMix {
                 }
                 if b >= 5 && b <= 6 {
                     *self.far.entry(a >> 20).or_default() += 1;
-                    // 64-byte lines: 32 short words, 16 normal words, or 64 bytes.
-                    let line = if (0xb80000..0xc0c000).contains(&a) {
-                        a >> 5
-                    } else if a < 0x60000000 {
-                        a >> 4
-                    } else {
-                        a >> 6
-                    };
+                    let line = data_line(a);
                     let e = self.lines.entry((pc, k)).or_insert((u32::MAX, 0));
                     if e.0 != line {
                         e.0 = line;
@@ -412,5 +461,30 @@ impl Drop for CycMix {
             self.idle.0, self.idle.1, self.idle.2
         );
         let _ = w.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{data_line, parse_slot};
+
+    #[test]
+    fn slots_parse() {
+        assert_eq!(parse_slot("4"), Some((4, 0, 0, 4)));
+        assert_eq!(parse_slot("6+m7/4"), Some((6, 1, 7, 4)));
+        assert_eq!(parse_slot("6+-3/2"), Some((6, 2, -3, 2)));
+        assert_eq!(parse_slot("16"), None);
+    }
+
+    #[test]
+    fn lines_are_physical_64_byte() {
+        // byte-space L2: 64 bytes per line (the old rule counted 16)
+        assert_eq!(data_line(0x2000_0000), data_line(0x2000_003c));
+        assert_ne!(data_line(0x2000_003c), data_line(0x2000_0040));
+        // a normal-word L2 address shares the line of its byte address
+        assert_eq!(data_line(0x800_0001), data_line(0x2000_0004));
+        assert_eq!(data_line(0x800_0010), data_line(0x2000_0040));
+        // DDR byte space
+        assert_eq!(data_line(0x8000_0000) + 1, data_line(0x8000_0040));
     }
 }

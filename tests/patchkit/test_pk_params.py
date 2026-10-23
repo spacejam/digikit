@@ -35,7 +35,16 @@ def test_rules_are_declared_for_the_three_anchors():
             "cf.params.ref",
             "cf.params.bound",
             "cf.params.t2",
-        }
+        } | (
+            {
+                "cf.params.randone",
+                "cf.params.rand",
+                "cf.params.write",
+                "cf.params.drawone",
+            }
+            if device == "dt2"
+            else set()
+        )
         assert rules["cf.params.t1"]["kind"] == "cf_params_t1"
         assert rules["cf.params.ref"]["kind"] == "cf_params_refs"
         assert rules["cf.params.bound"]["kind"] == "cf_params_bounds"
